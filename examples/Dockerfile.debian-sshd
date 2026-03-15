@@ -1,0 +1,27 @@
+# Debian 12 (bookworm) with OpenSSH server for Sistemo VMs.
+# Build: docker build -t sistemo-debian -f examples/Dockerfile.debian-sshd .
+# Then:  sudo sistemo image build sistemo-debian
+# Deploy: sistemo vm deploy sistemo-debian
+#
+# The build script (scripts/build-rootfs.sh) injects:
+# - ~/.sistemo/ssh/sistemo_key.pub into /root/.ssh/authorized_keys
+# - /init that mounts proc/sys/dev, configures 10.0.0.2 on eth0, then exec's systemd
+
+FROM debian:12
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y openssh-server iproute2 && \
+    mkdir -p /run/sshd /var/run/sshd && \
+    ssh-keygen -A && \
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Prevent systemd from overwriting the network config set by /init (10.0.0.2 on eth0).
+# Without this, systemd-networkd or networking.service can clear or change eth0 after init exec's systemd.
+RUN ln -sf /dev/null /etc/systemd/system/systemd-networkd.service && \
+    ln -sf /dev/null /etc/systemd/system/systemd-resolved.service && \
+    ln -sf /dev/null /etc/systemd/system/networking.service
+
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D"]

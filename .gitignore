@@ -1,0 +1,35 @@
+# Binary
+/sistemo
+sistemo-linux-*
+
+# Data
+*.db
+*.db-wal
+*.db-shm
+
+# Environment
+.env
+.env.local
+
+# IDE / tools
+.idea/
+.vscode/
+.claude/
+.cursor/
+
+# Logs
+*.log
+
+# Built rootfs images
+*.rootfs.ext4
+*.rootfs.ext4.gz
+
+# Node
+node_modules/
+
+# Not part of open-source repo
+deploy/
+docs/
+firecracker-bin/
+kernel/
+volumes/

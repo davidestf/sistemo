@@ -1,0 +1,575 @@
+package vm
+
+import (
+	"bytes"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	agentmw "github.com/davidestf/sistemo/internal/agent/api/middleware"
+	"github.com/davidestf/sistemo/internal/agent/config"
+	"github.com/davidestf/sistemo/internal/agent/firecracker"
+	"github.com/davidestf/sistemo/internal/agent/network"
+	"go.uber.org/zap"
+)
+
+// reqLog returns a logger tagged with request_id (if in context) and vm_id.
+func reqLog(ctx context.Context, fallback *zap.Logger, vmID string) *zap.Logger {
+	l := agentmw.LoggerFromCtx(ctx, fallback)
+	return l.With(zap.String("vm_id", vmID))
+}
+
+func createVM(ctx context.Context, m *Manager, req *CreateRequest) (*CreateResponse, error) {
+	startTime := time.Now()
+
+	if req.VMID == "" || len(req.VMID) > 64 || strings.ContainsAny(req.VMID, " /\\\n\t\r") {
+		return nil, fmt.Errorf("invalid vm id")
+	}
+	maxVCPUs := m.cfg.MaxVCPUs
+	if maxVCPUs <= 0 {
+		maxVCPUs = 64
+	}
+	maxMemoryMB := m.cfg.MaxMemoryMB
+	if maxMemoryMB <= 0 {
+		maxMemoryMB = 262144
+	}
+	if req.VCPUs <= 0 || req.VCPUs > maxVCPUs {
+		return nil, fmt.Errorf("invalid vcpu count (max %d)", maxVCPUs)
+	}
+	if req.MemoryMB < 128 || req.MemoryMB > maxMemoryMB {
+		return nil, fmt.Errorf("invalid memory size (max %d MB)", maxMemoryMB)
+	}
+	maxStorageMB := m.cfg.MaxStorageMB
+	if maxStorageMB <= 0 {
+		maxStorageMB = 102400
+	}
+	if req.StorageMB > 0 && req.StorageMB > maxStorageMB {
+		return nil, fmt.Errorf("storage_mb exceeds max %d MB", maxStorageMB)
+	}
+
+	return createFresh(ctx, m, req, startTime)
+}
+
+func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime time.Time) (*CreateResponse, error) {
+	log := reqLog(ctx, m.logger, req.VMID)
+	log.Info("create_request", zap.Int("vcpus", req.VCPUs), zap.Int("memory_mb", req.MemoryMB), zap.Int("storage_mb", req.StorageMB))
+
+	t := time.Now()
+	net := network.NewVMNetwork(req.VMID, m.logger)
+	if err := net.Create(); err != nil {
+		return nil, fmt.Errorf("failed to create network namespace: %v", err)
+	}
+	if err := net.SetupNAT(m.cfg.HostInterface); err != nil {
+		net.Cleanup(m.cfg.HostInterface)
+		return nil, fmt.Errorf("failed to setup NAT: %v", err)
+	}
+	log.Info("phase: network_setup", zap.Duration("elapsed", time.Since(t)))
+
+	rootfs := req.Image
+	var sha *string
+	kernelPath := m.cfg.KernelImagePath
+	initrdPath := m.cfg.KernelInitrdPath
+
+	// Download from HTTP(S) URL if needed (cache key includes URL hash so different URLs don't share one file)
+	if hasHTTPPrefix(rootfs) {
+		dest := cachePathForURL(m.cfg.ImageCacheDir, rootfs)
+		p, s, err := downloadFromURL(rootfs, dest)
+		if err != nil {
+			net.Cleanup(m.cfg.HostInterface)
+			return nil, err
+		}
+		rootfs = p
+		sha = s
+	}
+
+	// Otherwise require an existing local path
+	if !filepath.IsAbs(rootfs) && !hasHTTPPrefix(rootfs) {
+		if _, err := os.Stat(rootfs); err != nil {
+			net.Cleanup(m.cfg.HostInterface)
+			return nil, fmt.Errorf("image %q is not available: pass an HTTP(S) URL to a rootfs.ext4 or an absolute path to a rootfs.ext4 file", req.Image)
+		}
+	}
+
+	// Pre-flight disk space check
+	if err := checkDiskSpace(m.cfg.VMBaseDir, m.cfg.MinDiskFreeMB); err != nil {
+		net.Cleanup(m.cfg.HostInterface)
+		return nil, err
+	}
+
+	vmDir := filepath.Join(m.cfg.VMBaseDir, req.VMID)
+	if err := os.MkdirAll(vmDir, 0755); err != nil {
+		net.Cleanup(m.cfg.HostInterface)
+		return nil, fmt.Errorf("failed to create VM directory: %v", err)
+	}
+
+	t = time.Now()
+	vmRootfs := filepath.Join(vmDir, "rootfs.ext4")
+	if err := copyFile(rootfs, vmRootfs); err != nil {
+		os.RemoveAll(vmDir)
+		net.Cleanup(m.cfg.HostInterface)
+		return nil, fmt.Errorf("failed to copy rootfs: %v", err)
+	}
+	log.Info("phase: copy_rootfs", zap.Duration("elapsed", time.Since(t)))
+
+	if req.StorageMB > 0 {
+		t = time.Now()
+		if err := resizeRootfsTo(vmRootfs, req.StorageMB, log); err != nil {
+			os.RemoveAll(vmDir)
+			net.Cleanup(m.cfg.HostInterface)
+			return nil, fmt.Errorf("resize rootfs to %d MB: %w", req.StorageMB, err)
+		}
+		log.Info("phase: resize_rootfs", zap.Duration("elapsed", time.Since(t)), zap.Int("storage_mb", req.StorageMB))
+	}
+
+	// Always inject /init and SSH key into the rootfs copy so exec and terminal work.
+	// This operates on the copy in vmDir, not the original image.
+	{
+		if err := verifyExt4Superblock(vmRootfs); err != nil {
+			os.RemoveAll(vmDir)
+			net.Cleanup(m.cfg.HostInterface)
+			return nil, fmt.Errorf("rootfs is not a valid ext4 image (incomplete or wrong file?): %w", err)
+		}
+		t = time.Now()
+		pubKey := m.cfg.SSHKeyPath + ".pub"
+		if err := injectRootfs(vmRootfs, pubKey, m.logger); err != nil {
+			os.RemoveAll(vmDir)
+			net.Cleanup(m.cfg.HostInterface)
+			return nil, fmt.Errorf("inject init/SSH into rootfs: %v", err)
+		}
+		log.Info("phase: inject_rootfs", zap.Duration("elapsed", time.Since(t)))
+	}
+
+	guestMAC := generateDeterministicMAC(req.VMID)
+	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", network.GetBootArgs())
+
+	drives := []firecracker.Drive{{DriveID: "rootfs", PathOnHost: vmRootfs, IsRootDevice: true, IsReadOnly: false}}
+	driveLetters := []string{"vdb", "vdc", "vdd", "vde", "vdf", "vdg", "vdh"}
+
+	// Append attached volumes
+	drives = appendAttachedStorage(drives, req.AttachedStorage, driveLetters, m.logger)
+
+	nics := []firecracker.NetworkInterface{
+		{IfaceID: "eth0", GuestMAC: guestMAC, HostDevName: net.TapName},
+	}
+
+	// Apply rate limiters (asymmetric: download vs upload)
+	rxRL, txRL, diskRL := buildRateLimiters(m.cfg, req)
+	nics = applyNetRateLimiters(nics, rxRL, txRL)
+	drives = applyDiskRateLimiter(drives, diskRL)
+
+	cfg := firecracker.VMConfig{
+		BootSource:        firecracker.BootSource{KernelImagePath: kernelPath, BootArgs: bootArgs, InitrdPath: initrdPath},
+		Drives:            drives,
+		MachineConfig:     firecracker.MachineConfig{VCPUCount: req.VCPUs, MemSizeMiB: req.MemoryMB},
+		NetworkInterfaces: nics,
+	}
+
+	t = time.Now()
+	pid, err := firecracker.LaunchInNamespace(m.cfg.VMBaseDir, req.VMID, m.cfg.FirecrackerBin, cfg, net.NamespaceName, req.VCPUs, req.MemoryMB, m.logger)
+	if err != nil {
+		os.RemoveAll(vmDir)
+		net.Cleanup(m.cfg.HostInterface)
+		return nil, fmt.Errorf("failed to launch firecracker: %v", err)
+	}
+	log.Info("phase: firecracker_launch", zap.Duration("elapsed", time.Since(t)), zap.Int("pid", pid))
+
+	if err := os.WriteFile(filepath.Join(vmDir, "tap_name"), []byte(net.TapName), 0644); err != nil {
+		log.Warn("failed to write tap_name", zap.Error(err))
+	}
+	spec := struct{ VCPUs int `json:"vcpus"`; MemoryMB int `json:"memory_mb"` }{req.VCPUs, req.MemoryMB}
+	specData, err := json.Marshal(spec)
+	if err != nil {
+		os.RemoveAll(vmDir)
+		net.Cleanup(m.cfg.HostInterface)
+		return nil, fmt.Errorf("marshal vm_spec: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(vmDir, "vm_spec.json"), specData, 0644); err != nil {
+		os.RemoveAll(vmDir)
+		net.Cleanup(m.cfg.HostInterface)
+		return nil, fmt.Errorf("write vm_spec.json: %w", err)
+	}
+
+	m.registerVM(&VMInfo{VMID: req.VMID, Namespace: net.NamespaceName, IP: network.VMIP, Status: "running", PID: pid})
+
+	t = time.Now()
+	sshReady := m.waitForSSH(net.NamespaceName, network.VMIP, 20*time.Second)
+	log.Info("phase: ssh_wait", zap.Duration("elapsed", time.Since(t)), zap.Bool("ready", sshReady))
+
+	log.Info("create complete", zap.Duration("total", time.Since(startTime)), zap.String("boot_method", "fresh"))
+
+	msg := fmt.Sprintf("pid=%d, namespace=%s", pid, net.NamespaceName)
+	return &CreateResponse{
+		VMID: req.VMID, Status: "running", IPAddress: network.VMIP,
+		BootMethod: "fresh", BootTimeMS: time.Since(startTime).Milliseconds(),
+		SSHReady: sshReady, ImageSHA: sha, Message: &msg, Namespace: net.NamespaceName,
+	}, nil
+}
+
+// Helper functions
+
+func appendAttachedStorage(drives []firecracker.Drive, storagePaths []string, driveLetters []string, logger *zap.Logger) []firecracker.Drive {
+	nonRootCount := 0
+	for _, d := range drives {
+		if !d.IsRootDevice {
+			nonRootCount++
+		}
+	}
+	for _, filePath := range storagePaths {
+		idx := nonRootCount
+		if idx >= len(driveLetters) {
+			break
+		}
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			logger.Warn("skipping attached storage: file not found", zap.String("path", filePath))
+			continue
+		}
+		drives = append(drives, firecracker.Drive{DriveID: driveLetters[idx], PathOnHost: filePath, IsRootDevice: false, IsReadOnly: false})
+		nonRootCount++
+	}
+	return drives
+}
+
+// downloadFromURL downloads url to dest (creates parent dirs). Decompresses gzip if needed. Returns path and optional SHA256 hex.
+func downloadFromURL(url, dest string) (string, *string, error) {
+	if _, err := os.Stat(dest); err == nil {
+		return dest, nil, nil
+	}
+	os.MkdirAll(filepath.Dir(dest), 0755)
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Get(url)
+	if err != nil {
+		return "", nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return "", nil, errors.New(resp.Status)
+	}
+	f, err := os.Create(dest)
+	if err != nil {
+		return "", nil, err
+	}
+	defer f.Close()
+	h := sha256.New()
+
+	var src io.Reader = resp.Body
+	// If response is gzip (by header or magic), decompress so we write a valid ext4 image for mount/inject.
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		zr, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			os.Remove(dest)
+			return "", nil, fmt.Errorf("gzip reader: %w", err)
+		}
+		defer zr.Close()
+		src = zr
+	} else {
+		peek := make([]byte, 2)
+		n, _ := io.ReadFull(resp.Body, peek)
+		if n == 2 && peek[0] == 0x1f && peek[1] == 0x8b {
+			zr, err := gzip.NewReader(io.MultiReader(bytes.NewReader(peek), resp.Body))
+			if err != nil {
+				os.Remove(dest)
+				return "", nil, fmt.Errorf("gzip reader: %w", err)
+			}
+			defer zr.Close()
+			src = zr
+		} else {
+			src = io.MultiReader(bytes.NewReader(peek[:n]), resp.Body)
+		}
+	}
+	if _, err := io.Copy(io.MultiWriter(f, h), src); err != nil {
+		os.Remove(dest)
+		return "", nil, err
+	}
+	shaStr := hex.EncodeToString(h.Sum(nil))
+	return dest, &shaStr, nil
+}
+
+func hasHTTPPrefix(s string) bool {
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+}
+
+// cachePathForURL returns a cache file path that includes a hash of the URL so different URLs never share the same file.
+func cachePathForURL(cacheDir, url string) string {
+	h := sha256.Sum256([]byte(url))
+	hexHash := hex.EncodeToString(h[:])[:16]
+	return filepath.Join(cacheDir, hexHash+"_rootfs.ext4")
+}
+
+// verifyExt4Superblock reads the ext4 magic at offset 1080 (superblock s_magic). Returns nil if valid.
+func verifyExt4Superblock(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	// Ext4 superblock is at offset 1024; s_magic is at offset 56 within it = 1080.
+	if _, err := f.Seek(1080, io.SeekStart); err != nil {
+		return err
+	}
+	b := make([]byte, 2)
+	if _, err := io.ReadFull(f, b); err != nil {
+		return err
+	}
+	if b[0] != 0x53 || b[1] != 0xEF {
+		return fmt.Errorf("ext4 magic at offset 1080 is 0x%02x%02x, expected 0x53EF", b[0], b[1])
+	}
+	return nil
+}
+
+// startVM starts a stopped VM from its existing vmDir (rootfs.ext4 and optional vm_spec.json).
+func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, error) {
+	startTime := time.Now()
+	log := reqLog(ctx, m.logger, vmID)
+	vmDir := filepath.Join(m.cfg.VMBaseDir, vmID)
+	vmRootfs := filepath.Join(vmDir, "rootfs.ext4")
+	if _, err := os.Stat(vmRootfs); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("VM %s has no rootfs (run deploy first)", vmID)
+		}
+		return nil, err
+	}
+
+	vcpus, memoryMB := 2, 512
+	if data, err := os.ReadFile(filepath.Join(vmDir, "vm_spec.json")); err == nil {
+		var spec struct {
+			VCPUs    int `json:"vcpus"`
+			MemoryMB int `json:"memory_mb"`
+		}
+		if json.Unmarshal(data, &spec) == nil && spec.VCPUs > 0 && spec.MemoryMB >= 128 {
+			vcpus, memoryMB = spec.VCPUs, spec.MemoryMB
+		}
+	}
+
+	t := time.Now()
+	net := network.NewVMNetwork(vmID, m.logger)
+	if err := net.Create(); err != nil {
+		return nil, fmt.Errorf("failed to create network namespace: %v", err)
+	}
+	if err := net.SetupNAT(m.cfg.HostInterface); err != nil {
+		net.Cleanup(m.cfg.HostInterface)
+		return nil, fmt.Errorf("failed to setup NAT: %v", err)
+	}
+	log.Info("phase: network_setup", zap.Duration("elapsed", time.Since(t)))
+
+	guestMAC := generateDeterministicMAC(vmID)
+	kernelPath := m.cfg.KernelImagePath
+	initrdPath := m.cfg.KernelInitrdPath
+	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", network.GetBootArgs())
+
+	drives := []firecracker.Drive{{DriveID: "rootfs", PathOnHost: vmRootfs, IsRootDevice: true, IsReadOnly: false}}
+	driveLetters := []string{"vdb", "vdc", "vdd", "vde", "vdf", "vdg", "vdh"}
+
+	// Re-attach volumes from vm_spec if present
+	if specData, err := os.ReadFile(filepath.Join(vmDir, "vm_spec.json")); err == nil {
+		var spec struct {
+			AttachedStorage []string `json:"attached_storage"`
+		}
+		if json.Unmarshal(specData, &spec) == nil {
+			drives = appendAttachedStorage(drives, spec.AttachedStorage, driveLetters, m.logger)
+		}
+	}
+
+	nics := []firecracker.NetworkInterface{
+		{IfaceID: "eth0", GuestMAC: guestMAC, HostDevName: net.TapName},
+	}
+	cfg := firecracker.VMConfig{
+		BootSource:        firecracker.BootSource{KernelImagePath: kernelPath, BootArgs: bootArgs, InitrdPath: initrdPath},
+		Drives:            drives,
+		MachineConfig:     firecracker.MachineConfig{VCPUCount: vcpus, MemSizeMiB: memoryMB},
+		NetworkInterfaces: nics,
+	}
+
+	t = time.Now()
+	pid, err := firecracker.LaunchInNamespace(m.cfg.VMBaseDir, vmID, m.cfg.FirecrackerBin, cfg, net.NamespaceName, vcpus, memoryMB, m.logger)
+	if err != nil {
+		net.Cleanup(m.cfg.HostInterface)
+		return nil, fmt.Errorf("failed to launch firecracker: %v", err)
+	}
+	log.Info("phase: firecracker_launch", zap.Duration("elapsed", time.Since(t)), zap.Int("pid", pid))
+
+	_ = os.WriteFile(filepath.Join(vmDir, "tap_name"), []byte(net.TapName), 0644)
+
+	m.registerVM(&VMInfo{VMID: vmID, Namespace: net.NamespaceName, IP: network.VMIP, Status: "running", PID: pid})
+
+	t = time.Now()
+	sshReady := m.waitForSSH(net.NamespaceName, network.VMIP, 20*time.Second)
+	log.Info("phase: ssh_wait", zap.Duration("elapsed", time.Since(t)), zap.Bool("ready", sshReady))
+
+	msg := fmt.Sprintf("pid=%d, namespace=%s (started from existing rootfs)", pid, net.NamespaceName)
+	return &CreateResponse{
+		VMID: vmID, Status: "running", IPAddress: network.VMIP,
+		BootMethod: "fresh", BootTimeMS: time.Since(startTime).Milliseconds(),
+		SSHReady: sshReady, Message: &msg, Namespace: net.NamespaceName,
+	}, nil
+}
+
+// checkDiskSpace verifies that the filesystem at dir has at least minFreeMB megabytes free.
+func checkDiskSpace(dir string, minFreeMB int64) error {
+	if minFreeMB <= 0 {
+		return nil
+	}
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(dir, &stat); err != nil {
+		return fmt.Errorf("check disk space: %w", err)
+	}
+	freeMB := int64(stat.Bavail) * int64(stat.Bsize) / (1024 * 1024)
+	if freeMB < minFreeMB {
+		return fmt.Errorf("insufficient disk space: %d MB free, need at least %d MB", freeMB, minFreeMB)
+	}
+	return nil
+}
+
+// isE2fsckSuccess returns true for exit code 0 (no errors) or 1 (errors corrected).
+func isE2fsckSuccess(exitCode int) bool {
+	return exitCode == 0 || exitCode == 1
+}
+
+// resizeRootfsTo grows the ext4 image at path to at least storageMB MiB when the file is smaller.
+// Requires e2fsck and resize2fs (e2fsprogs). No-op if storageMB <= 0 or file is already >= storageMB.
+func resizeRootfsTo(path string, storageMB int, log *zap.Logger) error {
+	if storageMB <= 0 {
+		return nil
+	}
+	if _, err := exec.LookPath("e2fsck"); err != nil {
+		return fmt.Errorf("e2fsck not found (install e2fsprogs): %w", err)
+	}
+	if _, err := exec.LookPath("resize2fs"); err != nil {
+		return fmt.Errorf("resize2fs not found (install e2fsprogs): %w", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	currentMB := int(fi.Size() / (1024 * 1024))
+	if currentMB >= storageMB {
+		return nil
+	}
+	sizeBytes := int64(storageMB) * 1024 * 1024
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open rootfs for resize: %w", err)
+	}
+	if err := f.Truncate(sizeBytes); err != nil {
+		f.Close()
+		return fmt.Errorf("truncate rootfs: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close rootfs: %w", err)
+	}
+	// Run e2fsck before resize to ensure filesystem consistency
+	if out, err := exec.Command("e2fsck", "-f", "-y", path).CombinedOutput(); err != nil {
+		exitCode := -1
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		}
+		if !isE2fsckSuccess(exitCode) {
+			return fmt.Errorf("e2fsck: %w (output: %s)", err, bytes.TrimSpace(out))
+		}
+		if log != nil && exitCode == 1 {
+			log.Info("e2fsck applied fixes before resize", zap.String("path", path), zap.String("output", string(bytes.TrimSpace(out))))
+		}
+	}
+	// resize2fs with one argument expands the filesystem to fill the device/file
+	if out, err := exec.Command("resize2fs", path).CombinedOutput(); err != nil {
+		return fmt.Errorf("resize2fs: %w (output: %s)", err, bytes.TrimSpace(out))
+	}
+	if log != nil {
+		log.Info("resized rootfs", zap.Int("target_mb", storageMB), zap.Int64("size_bytes", sizeBytes))
+	}
+	return nil
+}
+
+// mbpsToRL builds a bandwidth RateLimiter from a Mbps value. Returns nil if mbps <= 0.
+func mbpsToRL(mbps int) *firecracker.RateLimiter {
+	if mbps <= 0 {
+		return nil
+	}
+	bwBytes := int64(mbps) * 1_000_000 / 8
+	return &firecracker.RateLimiter{
+		Bandwidth: &firecracker.TokenBucket{
+			Size:         bwBytes,
+			OneTimeBurst: bwBytes,
+			RefillTime:   1000,
+		},
+	}
+}
+
+// buildRateLimiters resolves effective limits (request > 0 wins, else config default)
+// and returns Firecracker rate limiters for network (rx/tx separate) and disk.
+func buildRateLimiters(cfg *config.Config, req *CreateRequest) (rxRL, txRL, diskRL *firecracker.RateLimiter) {
+	// Network download (rx = into VM)
+	dlMbps := req.BandwidthMbps
+	if dlMbps <= 0 {
+		dlMbps = cfg.DefaultBandwidthMbps
+	}
+	rxRL = mbpsToRL(dlMbps)
+
+	// Network upload (tx = out of VM) — separate, lower limit
+	ulMbps := req.UploadMbps
+	if ulMbps <= 0 {
+		ulMbps = cfg.DefaultUploadMbps
+	}
+	txRL = mbpsToRL(ulMbps)
+
+	// Disk I/O
+	iops := req.DiskIOPS
+	if iops <= 0 {
+		iops = cfg.DefaultIOPS
+	}
+	diskBWMbps := req.DiskBWMbps
+	if diskBWMbps <= 0 {
+		diskBWMbps = cfg.DefaultDiskBWMbps
+	}
+	if iops > 0 || diskBWMbps > 0 {
+		diskRL = &firecracker.RateLimiter{}
+		if diskBWMbps > 0 {
+			bwBytes := int64(diskBWMbps) * 1_048_576 // MB/s → bytes per refill period
+			diskRL.Bandwidth = &firecracker.TokenBucket{
+				Size:         bwBytes,
+				OneTimeBurst: bwBytes * 50, // large burst so boot I/O isn't throttled
+				RefillTime:   1000,
+			}
+		}
+		if iops > 0 {
+			diskRL.Ops = &firecracker.TokenBucket{
+				Size:         int64(iops),
+				OneTimeBurst: int64(iops) * 50, // large burst so boot I/O isn't throttled
+				RefillTime:   1000,
+			}
+		}
+	}
+
+	return rxRL, txRL, diskRL
+}
+
+// applyNetRateLimiters sets separate rx (download) and tx (upload) rate limiters on all NICs.
+func applyNetRateLimiters(nics []firecracker.NetworkInterface, rxRL, txRL *firecracker.RateLimiter) []firecracker.NetworkInterface {
+	for i := range nics {
+		nics[i].RxRateLimiter = rxRL
+		nics[i].TxRateLimiter = txRL
+	}
+	return nics
+}
+
+// applyDiskRateLimiter sets rate limiter on all drives.
+func applyDiskRateLimiter(drives []firecracker.Drive, rl *firecracker.RateLimiter) []firecracker.Drive {
+	if rl == nil {
+		return drives
+	}
+	for i := range drives {
+		drives[i].RateLimiter = rl
+	}
+	return drives
+}
