@@ -43,17 +43,8 @@ func (sw *safeWriter) WriteMessage(messageType int, data []byte) error {
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
-	CheckOrigin: func(r *http.Request) bool {
-		// Allow localhost origins (self-hosted runs on the same machine)
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			return true
-		}
-		return strings.HasPrefix(origin, "http://localhost") ||
-			strings.HasPrefix(origin, "http://127.0.0.1") ||
-			strings.HasPrefix(origin, "https://localhost") ||
-			strings.HasPrefix(origin, "https://127.0.0.1")
-	},
+	// Self-hosted: allow all origins. Access is controlled by HOST_API_KEY and network exposure.
+	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
 type Terminal struct {
