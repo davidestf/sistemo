@@ -35,10 +35,17 @@ jobs:
           GOARCH: arm64
         run: go build -ldflags="-s -w -X main.versionStr=${{ github.ref_name }}" -o sistemo-linux-arm64 ./cmd/sistemo
 
+      - name: Download kernels
+        run: |
+          curl -sSLf -o vmlinux-x86_64 https://get.sistemo.io/kernel/vmlinux-x86_64
+          curl -sSLf -o vmlinux-aarch64 https://get.sistemo.io/kernel/vmlinux-aarch64
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             sistemo-linux-amd64
             sistemo-linux-arm64
+            vmlinux-x86_64
+            vmlinux-aarch64
           generate_release_notes: true

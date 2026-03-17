@@ -659,7 +659,15 @@ func fetchRegistryIndex() *registryIndex {
 }
 
 // knownRemoteImages is the fallback list when the registry is unreachable.
-var knownRemoteImages = []string{"debian", "ubuntu", "alpine"}
+var knownRemoteImages = []string{"debian", "ubuntu", "fedora", "almalinux", "archlinux"}
+
+// archSuffix returns "-arm64" on ARM64 systems, empty string on x86_64.
+func archSuffix() string {
+	if runtime.GOARCH == "arm64" {
+		return "-arm64"
+	}
+	return ""
+}
 
 // resolveImage resolves an image argument to an absolute path or URL.
 // Order: URL → local file → local cache → registry download → error.
@@ -686,17 +694,21 @@ func resolveImage(logger *zap.Logger, dataDir, image string) string {
 		return localPath
 	}
 
-	// 4. Download from registry (try .gz first for faster download, fall back to uncompressed)
+	// 4. Download from registry
+	// On ARM64: try debian-arm64.rootfs.ext4.gz first, fall back to debian.rootfs.ext4.gz
 	imagesDir := filepath.Join(dataDir, "images")
 	os.MkdirAll(imagesDir, 0755)
 	dest := filepath.Join(imagesDir, image+".rootfs.ext4")
-	gzURL := registryURL() + image + ".rootfs.ext4.gz"
-	rawURL := registryURL() + image + ".rootfs.ext4"
+	suffix := archSuffix()
+
+	registryFile := image + suffix + ".rootfs.ext4.gz"
+	gzURL := registryURL() + registryFile
 
 	fmt.Printf("Downloading %s from %s...\n", image, registryURL())
 	err := downloadImageToFile(gzURL, dest)
 	if err != nil {
-		// Fall back to uncompressed
+		// Try uncompressed
+		rawURL := registryURL() + image + suffix + ".rootfs.ext4"
 		err = downloadImageToFile(rawURL, dest)
 	}
 	if err != nil {
@@ -705,7 +717,7 @@ func resolveImage(logger *zap.Logger, dataDir, image string) string {
 		fmt.Fprintf(os.Stderr, "Image %q not found.\n\n", image)
 		fmt.Fprintln(os.Stderr, "Sistemo looked in:")
 		fmt.Fprintf(os.Stderr, "  1. Local images:  %s (not found)\n", filepath.Join(dataDir, "images"))
-		fmt.Fprintf(os.Stderr, "  2. Registry:      %s (failed: %v)\n", rawURL, err)
+		fmt.Fprintf(os.Stderr, "  2. Registry:      %s%s (failed: %v)\n", registryURL(), image+suffix+".rootfs.ext4.gz", err)
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "To get an image:")
 		fmt.Fprintf(os.Stderr, "  Build from Docker:   sudo sistemo image build %s\n", image)
@@ -958,13 +970,12 @@ func runImagePull(logger *zap.Logger, dataDir, name string) {
 	}
 
 	dest := filepath.Join(imagesDir, name+".rootfs.ext4")
-	gzURL := registryURL() + name + ".rootfs.ext4.gz"
-	rawURL := registryURL() + name + ".rootfs.ext4"
+	suffix := archSuffix()
 
 	fmt.Printf("Pulling %s from %s... ", name, registryURL())
-	err := downloadImageToFile(gzURL, dest)
+	err := downloadImageToFile(registryURL()+name+suffix+".rootfs.ext4.gz", dest)
 	if err != nil {
-		err = downloadImageToFile(rawURL, dest)
+		err = downloadImageToFile(registryURL()+name+suffix+".rootfs.ext4", dest)
 	}
 	if err != nil {
 		fmt.Printf("failed: %v\n", err)
