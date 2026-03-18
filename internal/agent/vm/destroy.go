@@ -11,7 +11,7 @@ import (
 	"time"
 
 	agentmw "github.com/davidestf/sistemo/internal/agent/api/middleware"
-	"github.com/davidestf/sistemo/internal/agent/network"
+	network "github.com/davidestf/sistemo/internal/agent/network"
 	"go.uber.org/zap"
 )
 
@@ -26,6 +26,25 @@ func deleteVM(ctx context.Context, m *Manager, vmID string, preserveStorage bool
 	m.mu.RLock()
 	vmInfo := m.vms[vmID]
 	m.mu.RUnlock()
+
+	// Clean up port expose iptables rules (under the VM lock, so no race with concurrent Expose)
+	if m.db != nil && vmInfo != nil && vmInfo.IP != "" {
+		rows, err := m.db.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", vmID)
+		if err == nil {
+			var rules []network.PortRule
+			for rows.Next() {
+				var r network.PortRule
+				if rows.Scan(&r.HostPort, &r.VMPort, &r.Protocol) == nil {
+					rules = append(rules, r)
+				}
+			}
+			rows.Close()
+			if len(rules) > 0 {
+				net := network.NewVMNetwork(vmID, vmInfo.IP, m.logger)
+				net.CleanupPortRules(m.cfg.HostInterface, rules)
+			}
+		}
+	}
 
 	processKilled := false
 
@@ -89,8 +108,13 @@ func deleteVM(ctx context.Context, m *Manager, vmID string, preserveStorage bool
 	}
 
 	m.unregisterVM(vmID)
-	if err := os.RemoveAll(vmDir); err != nil {
-		log.Warn("failed to remove VM directory", zap.String("vm_id", vmID), zap.Error(err))
+	if err := network.ReleaseIP(m.db, vmID); err != nil {
+		log.Warn("failed to release IP", zap.Error(err))
+	}
+	if !preserveStorage {
+		if err := os.RemoveAll(vmDir); err != nil {
+			log.Warn("failed to remove VM directory", zap.String("vm_id", vmID), zap.Error(err))
+		}
 	}
 	log.Info("delete complete", zap.Duration("total", time.Since(deleteStart)), zap.Bool("preserve_storage", preserveStorage))
 	return processKilled, nil
@@ -127,6 +151,25 @@ func stopVM(ctx context.Context, m *Manager, vmID string) (bool, error) {
 				if killProcessGroup(pid, vmID, m.logger) {
 					processKilled = true
 				}
+			}
+		}
+	}
+
+	// Clean up port expose iptables rules (DB rows kept so they can be re-applied on start)
+	if m.db != nil && vmInfo != nil && vmInfo.IP != "" {
+		rows, err := m.db.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", vmID)
+		if err == nil {
+			var rules []network.PortRule
+			for rows.Next() {
+				var r network.PortRule
+				if rows.Scan(&r.HostPort, &r.VMPort, &r.Protocol) == nil {
+					rules = append(rules, r)
+				}
+			}
+			rows.Close()
+			if len(rules) > 0 {
+				net := network.NewVMNetwork(vmID, vmInfo.IP, m.logger)
+				net.CleanupPortRules(m.cfg.HostInterface, rules)
 			}
 		}
 	}
@@ -185,11 +228,6 @@ func killProcessGroup(pid int, vmID string, logger *zap.Logger) bool {
 		}
 	}
 	return !processExists(pid)
-}
-
-func killProcess(pid int) {
-	syscall.Kill(-pid, syscall.SIGKILL)
-	syscall.Kill(pid, syscall.SIGKILL)
 }
 
 func isFirecrackerProcess(pid int, vmID string) bool {

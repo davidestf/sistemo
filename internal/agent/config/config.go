@@ -2,10 +2,13 @@
 package config
 
 import (
+	"fmt"
 	"net"
+	"os"
 	"strings"
 
 	"github.com/kelseyhightower/envconfig"
+	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -39,6 +42,72 @@ type Config struct {
 	// Disk I/O rate limiting (0 = no limit; set to cap VM disk I/O if needed)
 	DefaultIOPS       int `envconfig:"DEFAULT_IOPS" default:"0"`
 	DefaultDiskBWMbps int `envconfig:"DEFAULT_DISK_BW_MBPS" default:"0"`
+
+	// Bridge subnet for VM networking (default: 10.200.0.0/16)
+	// Change if it conflicts with your VPN, Kubernetes, or other networks.
+	BridgeSubnet string `envconfig:"BRIDGE_SUBNET" default:"10.200.0.0/16"`
+}
+
+// yamlConfig mirrors Config fields for YAML parsing. Only non-zero values override.
+type yamlConfig struct {
+	Port                 *int    `yaml:"port"`
+	HostInterface        *string `yaml:"host_interface"`
+	MaxVCPUs             *int    `yaml:"max_vcpus"`
+	MaxMemoryMB          *int    `yaml:"max_memory_mb"`
+	MaxStorageMB         *int    `yaml:"max_storage_mb"`
+	MinDiskFreeMB        *int64  `yaml:"min_disk_free_mb"`
+	DefaultBandwidthMbps *int    `yaml:"default_bandwidth_mbps"`
+	DefaultUploadMbps    *int    `yaml:"default_upload_mbps"`
+	DefaultIOPS          *int    `yaml:"default_iops"`
+	DefaultDiskBWMbps    *int    `yaml:"default_disk_bw_mbps"`
+	BridgeSubnet         *string `yaml:"bridge_subnet"`
+}
+
+// LoadFromFile reads a YAML config file and applies non-zero values to cfg.
+// Should be called BEFORE envconfig.Process so env vars take final precedence.
+func LoadFromFile(path string, cfg *Config) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var yc yamlConfig
+	if err := yaml.Unmarshal(data, &yc); err != nil {
+		return err
+	}
+	if yc.Port != nil {
+		cfg.Port = *yc.Port
+	}
+	if yc.HostInterface != nil {
+		cfg.HostInterface = *yc.HostInterface
+	}
+	if yc.MaxVCPUs != nil {
+		cfg.MaxVCPUs = *yc.MaxVCPUs
+	}
+	if yc.MaxMemoryMB != nil {
+		cfg.MaxMemoryMB = *yc.MaxMemoryMB
+	}
+	if yc.MaxStorageMB != nil {
+		cfg.MaxStorageMB = *yc.MaxStorageMB
+	}
+	if yc.MinDiskFreeMB != nil {
+		cfg.MinDiskFreeMB = *yc.MinDiskFreeMB
+	}
+	if yc.DefaultBandwidthMbps != nil {
+		cfg.DefaultBandwidthMbps = *yc.DefaultBandwidthMbps
+	}
+	if yc.DefaultUploadMbps != nil {
+		cfg.DefaultUploadMbps = *yc.DefaultUploadMbps
+	}
+	if yc.DefaultIOPS != nil {
+		cfg.DefaultIOPS = *yc.DefaultIOPS
+	}
+	if yc.DefaultDiskBWMbps != nil {
+		cfg.DefaultDiskBWMbps = *yc.DefaultDiskBWMbps
+	}
+	if yc.BridgeSubnet != nil {
+		cfg.BridgeSubnet = *yc.BridgeSubnet
+	}
+	return nil
 }
 
 func Load() (*Config, error) {
@@ -54,6 +123,48 @@ func Load() (*Config, error) {
 		}
 	}
 	return &cfg, nil
+}
+
+// LoadWithFile loads config with priority: env vars > YAML file > struct defaults.
+func LoadWithFile(configPath string) (*Config, error) {
+	// 1. Start with envconfig defaults + any env vars
+	var cfg Config
+	if err := envconfig.Process("", &cfg); err != nil {
+		return nil, err
+	}
+	// 2. Apply YAML file on top (overrides envconfig defaults, but not explicit env vars)
+	if configPath != "" {
+		if _, err := os.Stat(configPath); err == nil {
+			if err := LoadFromFile(configPath, &cfg); err != nil {
+				return nil, err
+			}
+		}
+	}
+	// 3. Re-apply explicit env vars so they take final precedence over YAML
+	applyExplicitEnvOverrides(&cfg)
+
+	if cfg.HostInterface == "eth0" {
+		if detected := detectDefaultInterface(); detected != "" {
+			cfg.HostInterface = detected
+		}
+	}
+	return &cfg, nil
+}
+
+// applyExplicitEnvOverrides re-applies env vars that are explicitly set (not defaults).
+func applyExplicitEnvOverrides(cfg *Config) {
+	if v := os.Getenv("PORT"); v != "" {
+		var p int
+		if _, err := fmt.Sscanf(v, "%d", &p); err == nil {
+			cfg.Port = p
+		}
+	}
+	if v := os.Getenv("HOST_INTERFACE"); v != "" {
+		cfg.HostInterface = v
+	}
+	if v := os.Getenv("HOST_API_KEY"); v != "" {
+		cfg.APIKey = v
+	}
 }
 
 // detectDefaultInterface returns the network interface used for the default route.

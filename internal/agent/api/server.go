@@ -56,6 +56,8 @@ func NewRouter(cfg *config.Config, mgr *vm.Manager, logger *zap.Logger, db *sql.
 	r.Get("/vms/{vmID}/logs", vmHandler.Logs)
 	r.Get("/vms", vmHandler.List)
 	r.Post("/vms/{vmID}/exec", vmHandler.Exec)
+	r.Post("/vms/{vmID}/expose", vmHandler.Expose)
+	r.Delete("/vms/{vmID}/expose/{hostPort}", vmHandler.Unexpose)
 
 	r.Get("/terminals/vm/{vmID}", terminalHandler.TerminalPageOrWebSocket)
 	r.Post("/vms/{vmID}/terminal-session", terminalHandler.CreateSession)

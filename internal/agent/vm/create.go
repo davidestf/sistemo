@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,16 +68,19 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	log := reqLog(ctx, m.logger, req.VMID)
 	log.Info("create_request", zap.Int("vcpus", req.VCPUs), zap.Int("memory_mb", req.MemoryMB), zap.Int("storage_mb", req.StorageMB))
 
+	// Allocate a unique IP from the bridge subnet
+	vmIP, err := network.AllocateIP(m.db, req.VMID)
+	if err != nil {
+		return nil, fmt.Errorf("allocate IP: %v", err)
+	}
+
 	t := time.Now()
-	net := network.NewVMNetwork(req.VMID, m.logger)
+	net := network.NewVMNetwork(req.VMID, vmIP, m.logger)
 	if err := net.Create(); err != nil {
+		network.ReleaseIP(m.db, req.VMID)
 		return nil, fmt.Errorf("failed to create network namespace: %v", err)
 	}
-	if err := net.SetupNAT(m.cfg.HostInterface); err != nil {
-		net.Cleanup(m.cfg.HostInterface)
-		return nil, fmt.Errorf("failed to setup NAT: %v", err)
-	}
-	log.Info("phase: network_setup", zap.Duration("elapsed", time.Since(t)))
+	log.Info("phase: network_setup", zap.Duration("elapsed", time.Since(t)), zap.String("vm_ip", vmIP))
 
 	rootfs := req.Image
 	var sha *string
@@ -88,6 +93,7 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 		p, s, err := downloadFromURL(rootfs, dest)
 		if err != nil {
 			net.Cleanup(m.cfg.HostInterface)
+			network.ReleaseIP(m.db, req.VMID)
 			return nil, err
 		}
 		rootfs = p
@@ -98,19 +104,26 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	if !filepath.IsAbs(rootfs) && !hasHTTPPrefix(rootfs) {
 		if _, err := os.Stat(rootfs); err != nil {
 			net.Cleanup(m.cfg.HostInterface)
+			network.ReleaseIP(m.db, req.VMID)
 			return nil, fmt.Errorf("image %q is not available: pass an HTTP(S) URL to a rootfs.ext4 or an absolute path to a rootfs.ext4 file", req.Image)
 		}
 	}
 
+	// cleanup releases network and IP on error
+	cleanup := func() {
+		net.Cleanup(m.cfg.HostInterface)
+		network.ReleaseIP(m.db, req.VMID)
+	}
+
 	// Pre-flight disk space check
 	if err := checkDiskSpace(m.cfg.VMBaseDir, m.cfg.MinDiskFreeMB); err != nil {
-		net.Cleanup(m.cfg.HostInterface)
+		cleanup()
 		return nil, err
 	}
 
 	vmDir := filepath.Join(m.cfg.VMBaseDir, req.VMID)
 	if err := os.MkdirAll(vmDir, 0755); err != nil {
-		net.Cleanup(m.cfg.HostInterface)
+		cleanup()
 		return nil, fmt.Errorf("failed to create VM directory: %v", err)
 	}
 
@@ -118,7 +131,7 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	vmRootfs := filepath.Join(vmDir, "rootfs.ext4")
 	if err := copyFile(rootfs, vmRootfs); err != nil {
 		os.RemoveAll(vmDir)
-		net.Cleanup(m.cfg.HostInterface)
+		cleanup()
 		return nil, fmt.Errorf("failed to copy rootfs: %v", err)
 	}
 	log.Info("phase: copy_rootfs", zap.Duration("elapsed", time.Since(t)))
@@ -127,7 +140,7 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 		t = time.Now()
 		if err := resizeRootfsTo(vmRootfs, req.StorageMB, log); err != nil {
 			os.RemoveAll(vmDir)
-			net.Cleanup(m.cfg.HostInterface)
+			cleanup()
 			return nil, fmt.Errorf("resize rootfs to %d MB: %w", req.StorageMB, err)
 		}
 		log.Info("phase: resize_rootfs", zap.Duration("elapsed", time.Since(t)), zap.Int("storage_mb", req.StorageMB))
@@ -138,21 +151,21 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	{
 		if err := verifyExt4Superblock(vmRootfs); err != nil {
 			os.RemoveAll(vmDir)
-			net.Cleanup(m.cfg.HostInterface)
+			cleanup()
 			return nil, fmt.Errorf("rootfs is not a valid ext4 image (incomplete or wrong file?): %w", err)
 		}
 		t = time.Now()
 		pubKey := m.cfg.SSHKeyPath + ".pub"
 		if err := injectRootfs(vmRootfs, pubKey, m.logger); err != nil {
 			os.RemoveAll(vmDir)
-			net.Cleanup(m.cfg.HostInterface)
+			cleanup()
 			return nil, fmt.Errorf("inject init/SSH into rootfs: %v", err)
 		}
 		log.Info("phase: inject_rootfs", zap.Duration("elapsed", time.Since(t)))
 	}
 
 	guestMAC := generateDeterministicMAC(req.VMID)
-	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", network.GetBootArgs())
+	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", network.GetBootArgs(vmIP))
 
 	drives := []firecracker.Drive{{DriveID: "rootfs", PathOnHost: vmRootfs, IsRootDevice: true, IsReadOnly: false}}
 	driveLetters := []string{"vdb", "vdc", "vdd", "vde", "vdf", "vdg", "vdh"}
@@ -180,7 +193,7 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	pid, err := firecracker.LaunchInNamespace(m.cfg.VMBaseDir, req.VMID, m.cfg.FirecrackerBin, cfg, net.NamespaceName, req.VCPUs, req.MemoryMB, m.logger)
 	if err != nil {
 		os.RemoveAll(vmDir)
-		net.Cleanup(m.cfg.HostInterface)
+		cleanup()
 		return nil, fmt.Errorf("failed to launch firecracker: %v", err)
 	}
 	log.Info("phase: firecracker_launch", zap.Duration("elapsed", time.Since(t)), zap.Int("pid", pid))
@@ -192,26 +205,26 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	specData, err := json.Marshal(spec)
 	if err != nil {
 		os.RemoveAll(vmDir)
-		net.Cleanup(m.cfg.HostInterface)
+		cleanup()
 		return nil, fmt.Errorf("marshal vm_spec: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(vmDir, "vm_spec.json"), specData, 0644); err != nil {
 		os.RemoveAll(vmDir)
-		net.Cleanup(m.cfg.HostInterface)
+		cleanup()
 		return nil, fmt.Errorf("write vm_spec.json: %w", err)
 	}
 
-	m.registerVM(&VMInfo{VMID: req.VMID, Namespace: net.NamespaceName, IP: network.VMIP, Status: "running", PID: pid})
+	m.registerVM(&VMInfo{VMID: req.VMID, Namespace: net.NamespaceName, IP: vmIP, Status: "running", PID: pid})
 
 	t = time.Now()
-	sshReady := m.waitForSSH(net.NamespaceName, network.VMIP, 20*time.Second)
+	sshReady := m.waitForSSH(vmIP, 20*time.Second)
 	log.Info("phase: ssh_wait", zap.Duration("elapsed", time.Since(t)), zap.Bool("ready", sshReady))
 
 	log.Info("create complete", zap.Duration("total", time.Since(startTime)), zap.String("boot_method", "fresh"))
 
 	msg := fmt.Sprintf("pid=%d, namespace=%s", pid, net.NamespaceName)
 	return &CreateResponse{
-		VMID: req.VMID, Status: "running", IPAddress: network.VMIP,
+		VMID: req.VMID, Status: "running", IPAddress: vmIP,
 		BootMethod: "fresh", BootTimeMS: time.Since(startTime).Milliseconds(),
 		SSHReady: sshReady, ImageSHA: sha, Message: &msg, Namespace: net.NamespaceName,
 	}, nil
@@ -241,14 +254,43 @@ func appendAttachedStorage(drives []firecracker.Drive, storagePaths []string, dr
 	return drives
 }
 
+// validateImageURL checks that a URL is safe to fetch (no SSRF to internal networks).
+func validateImageURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("unsupported URL scheme %q: only http and https allowed", u.Scheme)
+	}
+	host := u.Hostname()
+	ips, err := net.LookupHost(host)
+	if err != nil {
+		return fmt.Errorf("cannot resolve %q: %w", host, err)
+	}
+	for _, ipStr := range ips {
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			continue
+		}
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("URL %q resolves to private/loopback IP %s: blocked for security", rawURL, ipStr)
+		}
+	}
+	return nil
+}
+
 // downloadFromURL downloads url to dest (creates parent dirs). Decompresses gzip if needed. Returns path and optional SHA256 hex.
-func downloadFromURL(url, dest string) (string, *string, error) {
+func downloadFromURL(rawurl, dest string) (string, *string, error) {
+	if err := validateImageURL(rawurl); err != nil {
+		return "", nil, err
+	}
 	if _, err := os.Stat(dest); err == nil {
 		return dest, nil, nil
 	}
 	os.MkdirAll(filepath.Dir(dest), 0755)
 	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Get(url)
+	resp, err := client.Get(rawurl)
 	if err != nil {
 		return "", nil, err
 	}
@@ -352,21 +394,32 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 		}
 	}
 
+	// Re-use existing IP or allocate new one
+	vmIP := network.GetAllocatedIP(m.db, vmID)
+	freshlyAllocated := false
+	if vmIP == "" {
+		var allocErr error
+		vmIP, allocErr = network.AllocateIP(m.db, vmID)
+		if allocErr != nil {
+			return nil, fmt.Errorf("allocate IP: %v", allocErr)
+		}
+		freshlyAllocated = true
+	}
+
 	t := time.Now()
-	net := network.NewVMNetwork(vmID, m.logger)
+	net := network.NewVMNetwork(vmID, vmIP, m.logger)
 	if err := net.Create(); err != nil {
+		if freshlyAllocated {
+			network.ReleaseIP(m.db, vmID)
+		}
 		return nil, fmt.Errorf("failed to create network namespace: %v", err)
 	}
-	if err := net.SetupNAT(m.cfg.HostInterface); err != nil {
-		net.Cleanup(m.cfg.HostInterface)
-		return nil, fmt.Errorf("failed to setup NAT: %v", err)
-	}
-	log.Info("phase: network_setup", zap.Duration("elapsed", time.Since(t)))
+	log.Info("phase: network_setup", zap.Duration("elapsed", time.Since(t)), zap.String("vm_ip", vmIP))
 
 	guestMAC := generateDeterministicMAC(vmID)
 	kernelPath := m.cfg.KernelImagePath
 	initrdPath := m.cfg.KernelInitrdPath
-	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", network.GetBootArgs())
+	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", network.GetBootArgs(vmIP))
 
 	drives := []firecracker.Drive{{DriveID: "rootfs", PathOnHost: vmRootfs, IsRootDevice: true, IsReadOnly: false}}
 	driveLetters := []string{"vdb", "vdc", "vdd", "vde", "vdf", "vdg", "vdh"}
@@ -395,22 +448,25 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 	pid, err := firecracker.LaunchInNamespace(m.cfg.VMBaseDir, vmID, m.cfg.FirecrackerBin, cfg, net.NamespaceName, vcpus, memoryMB, m.logger)
 	if err != nil {
 		net.Cleanup(m.cfg.HostInterface)
+		if freshlyAllocated {
+			network.ReleaseIP(m.db, vmID)
+		}
 		return nil, fmt.Errorf("failed to launch firecracker: %v", err)
 	}
 	log.Info("phase: firecracker_launch", zap.Duration("elapsed", time.Since(t)), zap.Int("pid", pid))
 
 	_ = os.WriteFile(filepath.Join(vmDir, "tap_name"), []byte(net.TapName), 0644)
 
-	m.registerVM(&VMInfo{VMID: vmID, Namespace: net.NamespaceName, IP: network.VMIP, Status: "running", PID: pid})
+	m.registerVM(&VMInfo{VMID: vmID, Namespace: net.NamespaceName, IP: vmIP, Status: "running", PID: pid})
 
 	t = time.Now()
-	sshReady := m.waitForSSH(net.NamespaceName, network.VMIP, 20*time.Second)
+	sshReady := m.waitForSSH(vmIP, 20*time.Second)
 	log.Info("phase: ssh_wait", zap.Duration("elapsed", time.Since(t)), zap.Bool("ready", sshReady))
 
 	msg := fmt.Sprintf("pid=%d, namespace=%s (started from existing rootfs)", pid, net.NamespaceName)
 	return &CreateResponse{
-		VMID: vmID, Status: "running", IPAddress: network.VMIP,
-		BootMethod: "fresh", BootTimeMS: time.Since(startTime).Milliseconds(),
+		VMID: vmID, Status: "running", IPAddress: vmIP,
+		BootMethod: "start", BootTimeMS: time.Since(startTime).Milliseconds(),
 		SSHReady: sshReady, Message: &msg, Namespace: net.NamespaceName,
 	}, nil
 }

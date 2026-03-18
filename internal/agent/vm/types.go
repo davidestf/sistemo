@@ -14,7 +14,7 @@ type CreateRequest struct {
 	UploadMbps      int               `json:"upload_mbps,omitempty"`
 	DiskIOPS        int               `json:"disk_iops,omitempty"`
 	DiskBWMbps      int               `json:"disk_bw_mbps,omitempty"`
-	// InjectInitSSH: inject /init (10.0.0.2) and SSH key into rootfs so terminal/exec work. Set for template deploys (URL or local).
+	// InjectInitSSH: inject /init and SSH key into rootfs so terminal/exec work.
 	InjectInitSSH bool `json:"inject_init_ssh,omitempty"`
 }
 

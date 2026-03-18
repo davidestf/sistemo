@@ -22,7 +22,7 @@ func TestGetShortID(t *testing.T) {
 }
 
 func TestNewVMNetwork(t *testing.T) {
-	net := NewVMNetwork("test-vm-abc", nil)
+	net := NewVMNetwork("test-vm-abc", "10.200.0.5", nil)
 
 	if !strings.HasPrefix(net.NamespaceName, "ns-") {
 		t.Errorf("namespace %q doesn't start with ns-", net.NamespaceName)
@@ -36,40 +36,23 @@ func TestNewVMNetwork(t *testing.T) {
 	if !strings.HasPrefix(net.TapName, "tap-") {
 		t.Errorf("tap %q doesn't start with tap-", net.TapName)
 	}
-	if net.GatewayIP != GatewayIP {
-		t.Errorf("gateway = %q, want %q", net.GatewayIP, GatewayIP)
+	if !strings.HasPrefix(net.NsBridge, "nb-") {
+		t.Errorf("ns bridge %q doesn't start with nb-", net.NsBridge)
 	}
-	if net.VMIP != VMIP {
-		t.Errorf("vm ip = %q, want %q", net.VMIP, VMIP)
-	}
-	if !strings.HasPrefix(net.VethHostIP, "10.200.") {
-		t.Errorf("veth host IP %q not in 10.200.0.0/16", net.VethHostIP)
+	if net.VMIP != "10.200.0.5" {
+		t.Errorf("vm ip = %q, want %q", net.VMIP, "10.200.0.5")
 	}
 }
 
 func TestGetBootArgs(t *testing.T) {
-	args := GetBootArgs()
-	if !strings.Contains(args, VMIP) {
-		t.Errorf("boot args %q don't contain VM IP %q", args, VMIP)
+	args := GetBootArgs("10.200.0.5")
+	if !strings.Contains(args, "10.200.0.5") {
+		t.Errorf("boot args %q don't contain VM IP", args)
 	}
-	if !strings.Contains(args, GatewayIP) {
-		t.Errorf("boot args %q don't contain gateway %q", args, GatewayIP)
+	if !strings.Contains(args, BridgeIP) {
+		t.Errorf("boot args %q don't contain bridge gateway %q", args, BridgeIP)
 	}
-}
-
-func TestGetUniqueSubnet(t *testing.T) {
-	third1, base1 := getUniqueSubnet("vm-1")
-	third2, base2 := getUniqueSubnet("vm-1")
-
-	if third1 != third2 || base1 != base2 {
-		t.Errorf("same input gave different subnets")
-	}
-
-	// Check range
-	if third1 < 0 || third1 > 255 {
-		t.Errorf("third octet %d out of range", third1)
-	}
-	if base1 < 0 || base1 > 252 {
-		t.Errorf("fourth base %d out of range", base1)
+	if !strings.Contains(args, "255.255.0.0") {
+		t.Errorf("boot args %q don't contain /16 netmask", args)
 	}
 }

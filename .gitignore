@@ -33,3 +33,4 @@ docs/
 firecracker-bin/
 kernel/
 volumes/
+test-scripts/

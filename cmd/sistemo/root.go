@@ -15,8 +15,6 @@ import (
 	"github.com/davidestf/sistemo/internal/db"
 )
 
-const defaultDataDir = ""
-
 type contextKey string
 
 const (
@@ -40,7 +38,7 @@ func rootCmd() *cobra.Command {
 		Long:  "Sistemo lets you run real Firecracker microVMs on your own Linux machine. Use 'sistemo up' to start the daemon, then 'sistemo vm deploy <image>' to create a VM.",
 	}
 	var dataDir string
-	cmd.PersistentFlags().StringVar(&dataDir, "data-dir", defaultDataDir, "Data directory (default: ~/.sistemo)")
+	cmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "Data directory (default: ~/.sistemo)")
 	cmd.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
 		logger := newLogger()
 		dir := getDataDir(dataDir)
@@ -107,12 +105,6 @@ func getDBFromCmd(cmd *cobra.Command) *sql.DB {
 	return nil
 }
 
-func syncLogger(cmd *cobra.Command) {
-	if l := cmd.Context().Value(contextKeyLogger); l != nil {
-		_ = l.(*zap.Logger).Sync()
-	}
-}
-
 var versionStr = "dev"
 
 func Execute() {
@@ -144,6 +136,8 @@ func Execute() {
 	root.AddCommand(imageCmd())
 	root.AddCommand(volumeCmd())
 	root.AddCommand(vmCmd())
+	root.AddCommand(serviceCmd())
+	root.AddCommand(configShowCmd())
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
