@@ -10,8 +10,7 @@ func upCmd() *cobra.Command {
 		Short: "Start the daemon (HTTP API)",
 		Long:  "Start the Sistemo daemon. Must run as root for VM networking (e.g. sudo sistemo up).",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			runDaemon(getLogger(cmd), getDataDirFromCmd(cmd))
-			return nil
+			return runDaemon(getLogger(cmd), getDataDirFromCmd(cmd))
 		},
 	}
 }

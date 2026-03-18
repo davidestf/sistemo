@@ -68,14 +68,20 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	log := reqLog(ctx, m.logger, req.VMID)
 	log.Info("create_request", zap.Int("vcpus", req.VCPUs), zap.Int("memory_mb", req.MemoryMB), zap.Int("storage_mb", req.StorageMB))
 
-	// Allocate a unique IP from the bridge subnet
-	vmIP, err := network.AllocateIP(m.db, req.VMID)
-	if err != nil {
-		return nil, fmt.Errorf("allocate IP: %v", err)
+	// Allocate a unique IP from the appropriate subnet
+	var vmIP string
+	var allocErr error
+	if req.NetworkSubnet != "" {
+		vmIP, allocErr = network.AllocateIPInSubnet(m.db, req.VMID, req.NetworkSubnet)
+	} else {
+		vmIP, allocErr = network.AllocateIP(m.db, req.VMID)
+	}
+	if allocErr != nil {
+		return nil, fmt.Errorf("allocate IP: %v", allocErr)
 	}
 
 	t := time.Now()
-	net := network.NewVMNetwork(req.VMID, vmIP, m.logger)
+	net := network.NewVMNetwork(req.VMID, vmIP, m.logger, req.NetworkBridge)
 	if err := net.Create(); err != nil {
 		network.ReleaseIP(m.db, req.VMID)
 		return nil, fmt.Errorf("failed to create network namespace: %v", err)
@@ -165,7 +171,11 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	}
 
 	guestMAC := generateDeterministicMAC(req.VMID)
-	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", network.GetBootArgs(vmIP))
+	ipBootArgs := network.GetBootArgs(vmIP)
+	if req.NetworkSubnet != "" {
+		ipBootArgs = network.GetBootArgsForSubnet(vmIP, req.NetworkSubnet)
+	}
+	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", ipBootArgs)
 
 	drives := []firecracker.Drive{{DriveID: "rootfs", PathOnHost: vmRootfs, IsRootDevice: true, IsReadOnly: false}}
 	driveLetters := []string{"vdb", "vdc", "vdd", "vde", "vdf", "vdg", "vdh"}
@@ -201,7 +211,18 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	if err := os.WriteFile(filepath.Join(vmDir, "tap_name"), []byte(net.TapName), 0644); err != nil {
 		log.Warn("failed to write tap_name", zap.Error(err))
 	}
-	spec := struct{ VCPUs int `json:"vcpus"`; MemoryMB int `json:"memory_mb"` }{req.VCPUs, req.MemoryMB}
+	spec := struct {
+		VCPUs           int      `json:"vcpus"`
+		MemoryMB        int      `json:"memory_mb"`
+		NetworkBridge   string   `json:"network_bridge,omitempty"`
+		NetworkSubnet   string   `json:"network_subnet,omitempty"`
+		AttachedStorage []string `json:"attached_storage,omitempty"`
+		BandwidthMbps   int      `json:"bandwidth_mbps,omitempty"`
+		UploadMbps      int      `json:"upload_mbps,omitempty"`
+		DiskIOPS        int      `json:"disk_iops,omitempty"`
+		DiskBWMbps      int      `json:"disk_bw_mbps,omitempty"`
+	}{req.VCPUs, req.MemoryMB, req.NetworkBridge, req.NetworkSubnet, req.AttachedStorage,
+		req.BandwidthMbps, req.UploadMbps, req.DiskIOPS, req.DiskBWMbps}
 	specData, err := json.Marshal(spec)
 	if err != nil {
 		os.RemoveAll(vmDir)
@@ -214,7 +235,7 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 		return nil, fmt.Errorf("write vm_spec.json: %w", err)
 	}
 
-	m.registerVM(&VMInfo{VMID: req.VMID, Namespace: net.NamespaceName, IP: vmIP, Status: "running", PID: pid})
+	m.registerVM(&VMInfo{VMID: req.VMID, Namespace: net.NamespaceName, IP: vmIP, Status: "running", PID: pid, NetworkBridge: req.NetworkBridge})
 
 	t = time.Now()
 	sshReady := m.waitForSSH(vmIP, 20*time.Second)
@@ -384,13 +405,29 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 	}
 
 	vcpus, memoryMB := 2, 512
+	var netBridge, netSubnet string
+	var savedReq CreateRequest // for rate limiters and other saved fields
 	if data, err := os.ReadFile(filepath.Join(vmDir, "vm_spec.json")); err == nil {
 		var spec struct {
-			VCPUs    int `json:"vcpus"`
-			MemoryMB int `json:"memory_mb"`
+			VCPUs         int    `json:"vcpus"`
+			MemoryMB      int    `json:"memory_mb"`
+			NetworkBridge string `json:"network_bridge"`
+			NetworkSubnet string `json:"network_subnet"`
+			BandwidthMbps int    `json:"bandwidth_mbps"`
+			UploadMbps    int    `json:"upload_mbps"`
+			DiskIOPS      int    `json:"disk_iops"`
+			DiskBWMbps    int    `json:"disk_bw_mbps"`
 		}
-		if json.Unmarshal(data, &spec) == nil && spec.VCPUs > 0 && spec.MemoryMB >= 128 {
-			vcpus, memoryMB = spec.VCPUs, spec.MemoryMB
+		if json.Unmarshal(data, &spec) == nil {
+			if spec.VCPUs > 0 && spec.MemoryMB >= 128 {
+				vcpus, memoryMB = spec.VCPUs, spec.MemoryMB
+			}
+			netBridge = spec.NetworkBridge
+			netSubnet = spec.NetworkSubnet
+			savedReq.BandwidthMbps = spec.BandwidthMbps
+			savedReq.UploadMbps = spec.UploadMbps
+			savedReq.DiskIOPS = spec.DiskIOPS
+			savedReq.DiskBWMbps = spec.DiskBWMbps
 		}
 	}
 
@@ -399,7 +436,11 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 	freshlyAllocated := false
 	if vmIP == "" {
 		var allocErr error
-		vmIP, allocErr = network.AllocateIP(m.db, vmID)
+		if netSubnet != "" {
+			vmIP, allocErr = network.AllocateIPInSubnet(m.db, vmID, netSubnet)
+		} else {
+			vmIP, allocErr = network.AllocateIP(m.db, vmID)
+		}
 		if allocErr != nil {
 			return nil, fmt.Errorf("allocate IP: %v", allocErr)
 		}
@@ -407,7 +448,7 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 	}
 
 	t := time.Now()
-	net := network.NewVMNetwork(vmID, vmIP, m.logger)
+	net := network.NewVMNetwork(vmID, vmIP, m.logger, netBridge)
 	if err := net.Create(); err != nil {
 		if freshlyAllocated {
 			network.ReleaseIP(m.db, vmID)
@@ -419,7 +460,11 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 	guestMAC := generateDeterministicMAC(vmID)
 	kernelPath := m.cfg.KernelImagePath
 	initrdPath := m.cfg.KernelInitrdPath
-	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", network.GetBootArgs(vmIP))
+	startIPBootArgs := network.GetBootArgs(vmIP)
+	if netSubnet != "" {
+		startIPBootArgs = network.GetBootArgsForSubnet(vmIP, netSubnet)
+	}
+	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", startIPBootArgs)
 
 	drives := []firecracker.Drive{{DriveID: "rootfs", PathOnHost: vmRootfs, IsRootDevice: true, IsReadOnly: false}}
 	driveLetters := []string{"vdb", "vdc", "vdd", "vde", "vdf", "vdg", "vdh"}
@@ -437,6 +482,12 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 	nics := []firecracker.NetworkInterface{
 		{IfaceID: "eth0", GuestMAC: guestMAC, HostDevName: net.TapName},
 	}
+
+	// Restore rate limiters from saved spec
+	rxRL, txRL, diskRL := buildRateLimiters(m.cfg, &savedReq)
+	nics = applyNetRateLimiters(nics, rxRL, txRL)
+	drives = applyDiskRateLimiter(drives, diskRL)
+
 	cfg := firecracker.VMConfig{
 		BootSource:        firecracker.BootSource{KernelImagePath: kernelPath, BootArgs: bootArgs, InitrdPath: initrdPath},
 		Drives:            drives,
@@ -457,7 +508,7 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 
 	_ = os.WriteFile(filepath.Join(vmDir, "tap_name"), []byte(net.TapName), 0644)
 
-	m.registerVM(&VMInfo{VMID: vmID, Namespace: net.NamespaceName, IP: vmIP, Status: "running", PID: pid})
+	m.registerVM(&VMInfo{VMID: vmID, Namespace: net.NamespaceName, IP: vmIP, Status: "running", PID: pid, NetworkBridge: netBridge})
 
 	t = time.Now()
 	sshReady := m.waitForSSH(vmIP, 20*time.Second)

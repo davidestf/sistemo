@@ -3,6 +3,7 @@ package vm
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -86,13 +87,15 @@ func (m *Manager) reconcile() {
 					var rules []network.PortRule
 					for rows.Next() {
 						var r network.PortRule
-						if rows.Scan(&r.HostPort, &r.VMPort, &r.Protocol) == nil {
-							rules = append(rules, r)
+						if err := rows.Scan(&r.HostPort, &r.VMPort, &r.Protocol); err != nil {
+							m.logger.Warn("reconciler: failed to scan port rule", zap.Error(err))
+							continue
 						}
+						rules = append(rules, r)
 					}
 					rows.Close()
 					if len(rules) > 0 {
-						net := network.NewVMNetwork(vmID, info.IP, m.logger)
+						net := network.NewVMNetwork(vmID, info.IP, m.logger, info.NetworkBridge)
 						net.CleanupPortRules(m.cfg.HostInterface, rules)
 					}
 					m.db.Exec("DELETE FROM port_rule WHERE vm_id = ?", vmID)
@@ -144,12 +147,23 @@ func (m *Manager) rehydrateFromDisk() {
 		if vmIP == "" {
 			vmIP = "10.200.0.2" // fallback for VMs created before bridge migration
 		}
+		// Read network bridge from vm_spec.json (for named network VMs)
+		var netBridge string
+		if specData, err := os.ReadFile(filepath.Join(vmDir, "vm_spec.json")); err == nil {
+			var spec struct {
+				NetworkBridge string `json:"network_bridge"`
+			}
+			if json.Unmarshal(specData, &spec) == nil {
+				netBridge = spec.NetworkBridge
+			}
+		}
 		m.registerVM(&VMInfo{
-			VMID:      vmID,
-			PID:       pid,
-			Namespace: namespace,
-			IP:        vmIP,
-			Status:    "running",
+			VMID:          vmID,
+			PID:           pid,
+			Namespace:     namespace,
+			IP:            vmIP,
+			Status:        "running",
+			NetworkBridge: netBridge,
 		})
 		m.logger.Info("rehydrated VM from disk", zap.String("vm_id", vmID), zap.String("namespace", namespace), zap.Int("pid", pid), zap.String("ip", vmIP))
 	}
@@ -184,7 +198,7 @@ func (m *Manager) restorePortRules() {
 		if !ok || info.IP == "" {
 			continue
 		}
-		net := network.NewVMNetwork(vmID, info.IP, m.logger)
+		net := network.NewVMNetwork(vmID, info.IP, m.logger, info.NetworkBridge)
 		if err := net.ExposePort(m.cfg.HostInterface, hostPort, vmPort, protocol); err != nil {
 			m.logger.Warn("failed to restore port rule",
 				zap.String("vm_id", vmID), zap.Int("host_port", hostPort), zap.Error(err))
@@ -300,7 +314,7 @@ func (m *Manager) ExposePort(vmID string, hostPort, vmPort int, protocol string)
 	if !ok {
 		return fmt.Errorf("VM %s not found or not running", vmID)
 	}
-	net := network.NewVMNetwork(vmID, info.IP, m.logger)
+	net := network.NewVMNetwork(vmID, info.IP, m.logger, info.NetworkBridge)
 	return net.ExposePort(m.cfg.HostInterface, hostPort, vmPort, protocol)
 }
 
@@ -312,7 +326,7 @@ func (m *Manager) UnexposePort(vmID string, hostPort, vmPort int, protocol strin
 	if !ok {
 		return fmt.Errorf("VM %s not found or not running", vmID)
 	}
-	net := network.NewVMNetwork(vmID, info.IP, m.logger)
+	net := network.NewVMNetwork(vmID, info.IP, m.logger, info.NetworkBridge)
 	return net.UnexposePort(m.cfg.HostInterface, hostPort, vmPort, protocol)
 }
 
@@ -322,15 +336,17 @@ func (m *Manager) CleanupPortRules(vmID string, rules []network.PortRule) {
 	info, ok := m.vms[vmID]
 	m.mu.RUnlock()
 	vmIP := ""
+	bridge := ""
 	if ok {
 		vmIP = info.IP
+		bridge = info.NetworkBridge
 	} else {
 		vmIP = network.GetAllocatedIP(m.db, vmID)
 	}
 	if vmIP == "" {
 		return
 	}
-	net := network.NewVMNetwork(vmID, vmIP, m.logger)
+	net := network.NewVMNetwork(vmID, vmIP, m.logger, bridge)
 	net.CleanupPortRules(m.cfg.HostInterface, rules)
 }
 

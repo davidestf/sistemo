@@ -40,7 +40,7 @@ func deleteVM(ctx context.Context, m *Manager, vmID string, preserveStorage bool
 			}
 			rows.Close()
 			if len(rules) > 0 {
-				net := network.NewVMNetwork(vmID, vmInfo.IP, m.logger)
+				net := network.NewVMNetwork(vmID, vmInfo.IP, m.logger, vmInfo.NetworkBridge)
 				net.CleanupPortRules(m.cfg.HostInterface, rules)
 			}
 		}
@@ -168,7 +168,7 @@ func stopVM(ctx context.Context, m *Manager, vmID string) (bool, error) {
 			}
 			rows.Close()
 			if len(rules) > 0 {
-				net := network.NewVMNetwork(vmID, vmInfo.IP, m.logger)
+				net := network.NewVMNetwork(vmID, vmInfo.IP, m.logger, vmInfo.NetworkBridge)
 				net.CleanupPortRules(m.cfg.HostInterface, rules)
 			}
 		}
