@@ -32,7 +32,7 @@ That's it. You have a Debian VM with a browser terminal at `http://localhost:808
 | **Setup** | One command | ISO install | One command |
 | **Resources** | Single binary, ~15 MB | Full OS | Daemon + images |
 | **Boot time** | < 15 seconds | Minutes | Seconds |
-| **Networking** | Automatic (namespace per VM) | Manual bridge setup | Docker network |
+| **Networking** | Bridge with unique IPs | Manual bridge setup | Docker network |
 | **Use case** | Dev/homelab VMs | Production VMs | Containers |
 
 Sistemo is for developers and homelabbers who want **real VMs** without the overhead of a full hypervisor.
@@ -40,8 +40,12 @@ Sistemo is for developers and homelabbers who want **real VMs** without the over
 ## Features
 
 - **Single binary** -- CLI + daemon in one ~15 MB file, zero dependencies beyond Linux + KVM
+- **Bridge networking** -- VMs get unique IPs, VM-to-VM connectivity works out of the box
+- **Port expose** -- Forward host ports to VMs: `--expose 80`
 - **Browser terminal** -- xterm.js over WebSocket, SSH into any VM from your browser
 - **Fast boot** -- Firecracker microVMs start in under 15 seconds
+- **Systemd service** -- `sistemo service install` makes the daemon survive reboots
+- **Config file** -- `~/.sistemo/config.yml` for persistent settings
 - **Images** -- Deploy `debian`, `ubuntu`, or `alpine` with one command
 - **Custom images** -- Build rootfs from any Docker image (`sistemo image build myimage`)
 - **Persistent volumes** -- Create volumes, attach to VMs, data survives VM destroy
@@ -107,8 +111,8 @@ sistemo vm deploy debian
 sistemo vm terminal debian
 # Opens http://localhost:8080 with a live terminal to your VM
 
-# 4. Or SSH directly
-sistemo vm exec debian "uname -a"
+# 4. SSH into the VM
+sistemo vm ssh debian
 ```
 
 ### Deploy with custom resources
@@ -157,15 +161,19 @@ sistemo vm deploy <image> [flags]       Create and start a VM
   --storage SIZE                        Disk (default: 2G)
   --name NAME                           VM name
   --attach VOLUME                       Attach a persistent volume
+  --expose PORT                         Expose port (hostPort:vmPort or just port)
 
 sistemo vm list                         List all VMs
 sistemo vm terminal <name|id>           Open browser terminal
 sistemo vm start <name|id>              Start a stopped VM
 sistemo vm stop <name|id>               Stop a running VM
 sistemo vm destroy <name|id>            Destroy a VM
+sistemo vm ssh <name|id>                SSH into a VM
 sistemo vm exec <name|id> <command>     Run a command in a VM via SSH
 sistemo vm logs <name|id>               Tail Firecracker logs
-sistemo vm status <name|id>             Show VM details (IP, resources, uptime)
+sistemo vm status <name|id>             Show VM details
+sistemo vm expose <name|id> --port P    Expose a VM port on the host
+sistemo vm unexpose <name|id> --port P  Remove a port expose rule
 
 sistemo volume create <size_mb>        Create a persistent volume
   --name NAME                           Volume name
@@ -176,37 +184,44 @@ sistemo image list                      List available images
 sistemo image pull <name>               Download an image from the registry
 sistemo image build <docker-image>      Build rootfs.ext4 from a Docker image
 sistemo ssh-key                         Print the SSH public key
+
+sistemo service install                 Install systemd service (survives reboots)
+sistemo service uninstall               Remove systemd service
+sistemo config                          Show effective configuration
 ```
 
 ## How It Works
 
 ```
-┌─────────────────────────────────────────────┐
-│  sistemo binary (CLI + daemon)              │
-│                                             │
-│  CLI ──HTTP──▶ Daemon (:8080)               │
-│                  │                          │
-│         ┌───────┼───────┐                   │
-│         ▼       ▼       ▼                   │
-│       VM 1    VM 2    VM 3                  │
-│      ┌─────┐ ┌─────┐ ┌─────┐              │
-│      │netns│ │netns│ │netns│  ◀── isolated │
-│      │ TAP │ │ TAP │ │ TAP │      network  │
-│      │ FC  │ │ FC  │ │ FC  │  ◀── per VM   │
-│      └─────┘ └─────┘ └─────┘              │
-│                                             │
-│  State: SQLite (~/.sistemo/sistemo.db)      │
-│  VMs:   ~/.sistemo/vms/{id}/               │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│  sistemo binary (CLI + daemon)                   │
+│                                                  │
+│  CLI ──HTTP──▶ Daemon (:8080)                   │
+│                  │                               │
+│         ┌───────┼───────┐                        │
+│         ▼       ▼       ▼                        │
+│       VM 1    VM 2    VM 3                       │
+│      ┌─────┐ ┌─────┐ ┌─────┐                   │
+│      │netns│ │netns│ │netns│                    │
+│      │ TAP │ │ TAP │ │ TAP │                    │
+│      │ FC  │ │ FC  │ │ FC  │                    │
+│      └──┬──┘ └──┬──┘ └──┬──┘                   │
+│         └───────┼───────┘                        │
+│          sistemo0 bridge (10.200.0.1/16)         │
+│       VMs: 10.200.0.2, .3, .4, ...              │
+│                                                  │
+│  State: SQLite (~/.sistemo/sistemo.db)           │
+│  VMs:   ~/.sistemo/vms/{id}/                    │
+└──────────────────────────────────────────────────┘
 ```
 
-Each VM runs in its own Linux network namespace with:
-- A **veth pair** connecting the namespace to the host
+Each VM runs in its own Linux network namespace connected to a shared bridge:
+- A **veth pair** connecting the namespace to the `sistemo0` bridge
 - A **TAP device** for Firecracker
-- **NAT rules** for outbound internet access
+- A **unique IP** from the 10.200.0.0/16 subnet
 - **SMTP blocked** (ports 25, 465, 587) to prevent spam
 
-The daemon manages the full VM lifecycle: create, start, stop, destroy, and auto-recovery of crashed VMs.
+VMs can communicate with each other via the bridge. Port forwarding uses iptables DNAT. The daemon manages the full VM lifecycle: create, start, stop, destroy, and auto-recovery of crashed VMs.
 
 ## Building Custom Images
 
@@ -223,15 +238,16 @@ Supported package managers for auto-install: apt (Debian/Ubuntu), apk (Alpine), 
 
 ## Configuration
 
-Sistemo uses environment variables and a data directory:
+Create `~/.sistemo/config.yml` for persistent settings, or use environment variables (env vars override YAML):
 
-| Variable / flag | Default | Description |
-|-----------------|---------|-------------|
-| `--data-dir` | `~/.sistemo` | Data directory for VMs, DB, keys (no env var; use flag) |
-| `SISTEMO_REGISTRY_URL` | `registry.sistemo.io` | Image registry URL |
-| `HOST_API_KEY` | (none) | API key if exposing daemon to network |
+| Setting | Env var | Default | Description |
+|---------|---------|---------|-------------|
+| `port` | `PORT` | 8080 | Daemon HTTP port |
+| `host_interface` | `HOST_INTERFACE` | auto-detected | Network interface for NAT |
+| — | `HOST_API_KEY` | (none) | API key if exposing daemon to network |
+| — | `SISTEMO_REGISTRY_URL` | `registry.sistemo.io` | Image registry URL |
 
-Use `sistemo --version` or `sistemo -v` to print the version.
+Run `sistemo config` to see the effective merged configuration.
 
 ## Security
 
@@ -246,9 +262,13 @@ Use `sistemo --version` or `sistemo -v` to print the version.
 
 Full documentation: **[docs.sistemo.io](https://docs.sistemo.io)**
 
-- [Installation guide](https://docs.sistemo.io/install/)
+- [Installation guide](https://docs.sistemo.io/installation/)
 - [CLI reference](https://docs.sistemo.io/commands/)
-- [Building custom images](https://docs.sistemo.io/custom-images/)
+- [Port expose](https://docs.sistemo.io/port-expose/)
+- [Networking](https://docs.sistemo.io/networking/)
+- [Systemd service](https://docs.sistemo.io/systemd/)
+- [Configuration](https://docs.sistemo.io/configuration/)
+- [Building custom images](https://docs.sistemo.io/building-images/)
 - [Architecture](https://docs.sistemo.io/architecture/)
 
 ## Uninstall
@@ -257,14 +277,14 @@ Full documentation: **[docs.sistemo.io](https://docs.sistemo.io)**
 # 1. Stop all VMs and the daemon
 sistemo vm list                    # check running VMs
 sistemo vm destroy <name>          # destroy each VM
-# Ctrl+C the daemon (or: sudo systemctl stop sistemo)
+sudo sistemo service uninstall     # if installed as systemd service
 
 # 2. Remove everything
 sudo rm -rf ~/.sistemo             # data, DB, images, volumes, SSH keys
 sudo rm -f /usr/local/bin/sistemo  # binary
 ```
 
-That's it. Sistemo is a single binary + one data directory. No system services, no config files outside `~/.sistemo/`.
+That's it. Sistemo is a single binary + one data directory.
 
 ## Contributing
 

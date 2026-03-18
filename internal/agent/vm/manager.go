@@ -2,7 +2,9 @@ package vm
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,15 +23,25 @@ import (
 type Manager struct {
 	cfg     *config.Config
 	logger  *zap.Logger
+	db      *sql.DB
 	mu      sync.RWMutex
 	vms     map[string]*VMInfo
 	vmLocks sync.Map // map[string]*sync.Mutex — per-VM operation lock
 }
 
-func NewManager(cfg *config.Config, logger *zap.Logger) *Manager {
-	m := &Manager{cfg: cfg, logger: logger, vms: make(map[string]*VMInfo)}
+func NewManager(cfg *config.Config, logger *zap.Logger, db *sql.DB) *Manager {
+	m := &Manager{cfg: cfg, logger: logger, db: db, vms: make(map[string]*VMInfo)}
 	os.MkdirAll(cfg.VMBaseDir, 0755)
+
+	// Parse bridge subnet from config and create the bridge
+	if err := network.ParseBridgeSubnet(cfg.BridgeSubnet); err != nil {
+		logger.Fatal("invalid bridge_subnet", zap.Error(err))
+	}
+	if err := network.EnsureBridge(cfg.HostInterface, logger); err != nil {
+		logger.Error("failed to create bridge", zap.Error(err))
+	}
 	m.rehydrateFromDisk()
+	m.restorePortRules()
 	preserve := make(map[string]struct{})
 	m.mu.RLock()
 	for _, info := range m.vms {
@@ -67,6 +79,25 @@ func (m *Manager) reconcile() {
 		if syscall.Kill(info.PID, 0) != nil {
 			m.logger.Warn("reconciler: VM process dead, cleaning up",
 				zap.String("vm_id", vmID), zap.Int("pid", info.PID))
+			// Clean up port expose iptables rules before removing network
+			if m.db != nil && info.IP != "" {
+				rows, err := m.db.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", vmID)
+				if err == nil {
+					var rules []network.PortRule
+					for rows.Next() {
+						var r network.PortRule
+						if rows.Scan(&r.HostPort, &r.VMPort, &r.Protocol) == nil {
+							rules = append(rules, r)
+						}
+					}
+					rows.Close()
+					if len(rules) > 0 {
+						net := network.NewVMNetwork(vmID, info.IP, m.logger)
+						net.CleanupPortRules(m.cfg.HostInterface, rules)
+					}
+					m.db.Exec("DELETE FROM port_rule WHERE vm_id = ?", vmID)
+				}
+			}
 			if info.Namespace != "" {
 				ns := &network.VMNetwork{NamespaceName: info.Namespace, Logger: m.logger}
 				ns.Cleanup(m.cfg.HostInterface)
@@ -109,14 +140,60 @@ func (m *Manager) rehydrateFromDisk() {
 		if namespace == "" {
 			continue
 		}
+		vmIP := network.GetAllocatedIP(m.db, vmID)
+		if vmIP == "" {
+			vmIP = "10.200.0.2" // fallback for VMs created before bridge migration
+		}
 		m.registerVM(&VMInfo{
 			VMID:      vmID,
 			PID:       pid,
 			Namespace: namespace,
-			IP:        network.VMIP,
+			IP:        vmIP,
 			Status:    "running",
 		})
-		m.logger.Info("rehydrated VM from disk", zap.String("vm_id", vmID), zap.String("namespace", namespace), zap.Int("pid", pid))
+		m.logger.Info("rehydrated VM from disk", zap.String("vm_id", vmID), zap.String("namespace", namespace), zap.Int("pid", pid), zap.String("ip", vmIP))
+	}
+}
+
+// restorePortRules re-applies iptables DNAT rules for all port_rule entries of running VMs.
+// Called on daemon startup after rehydration to restore port forwarding lost during restart.
+func (m *Manager) restorePortRules() {
+	if m.db == nil {
+		return
+	}
+	rows, err := m.db.Query(
+		`SELECT pr.vm_id, pr.host_port, pr.vm_port, pr.protocol
+		 FROM port_rule pr JOIN vm v ON pr.vm_id = v.id
+		 WHERE v.status = 'running'`)
+	if err != nil {
+		m.logger.Warn("failed to query port_rules for restore", zap.Error(err))
+		return
+	}
+	defer rows.Close()
+	restored := 0
+	for rows.Next() {
+		var vmID string
+		var hostPort, vmPort int
+		var protocol string
+		if rows.Scan(&vmID, &hostPort, &vmPort, &protocol) != nil {
+			continue
+		}
+		m.mu.RLock()
+		info, ok := m.vms[vmID]
+		m.mu.RUnlock()
+		if !ok || info.IP == "" {
+			continue
+		}
+		net := network.NewVMNetwork(vmID, info.IP, m.logger)
+		if err := net.ExposePort(m.cfg.HostInterface, hostPort, vmPort, protocol); err != nil {
+			m.logger.Warn("failed to restore port rule",
+				zap.String("vm_id", vmID), zap.Int("host_port", hostPort), zap.Error(err))
+			continue
+		}
+		restored++
+	}
+	if restored > 0 {
+		m.logger.Info("restored port expose rules from DB", zap.Int("count", restored))
 	}
 }
 
@@ -174,14 +251,13 @@ func (m *Manager) GetIP(ctx context.Context, vmID string) *IPResult {
 
 	result := &IPResult{VMID: vmID}
 	if ok {
-		via := "namespace-isolation"
+		via := "bridge"
 		result.IP = &info.IP
 		result.Namespace = &info.Namespace
 		result.DiscoveredVia = &via
 	} else {
-		vmDir := filepath.Join(m.cfg.VMBaseDir, vmID)
-		if _, err := os.Stat(vmDir); err == nil {
-			ip := network.VMIP
+		ip := network.GetAllocatedIP(m.db, vmID)
+		if ip != "" {
 			result.IP = &ip
 		}
 	}
@@ -203,11 +279,7 @@ func (m *Manager) GetVMIP(vmID string) string {
 	if info, ok := m.vms[vmID]; ok {
 		return info.IP
 	}
-	vmDir := filepath.Join(m.cfg.VMBaseDir, vmID)
-	if _, err := os.Stat(vmDir); err == nil {
-		return network.VMIP
-	}
-	return ""
+	return network.GetAllocatedIP(m.db, vmID)
 }
 
 func (m *Manager) ListVMs() []*VMInfo {
@@ -218,6 +290,48 @@ func (m *Manager) ListVMs() []*VMInfo {
 		list = append(list, v)
 	}
 	return list
+}
+
+// ExposePort sets up iptables DNAT to forward hostPort on the host to vmPort inside the VM.
+func (m *Manager) ExposePort(vmID string, hostPort, vmPort int, protocol string) error {
+	m.mu.RLock()
+	info, ok := m.vms[vmID]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("VM %s not found or not running", vmID)
+	}
+	net := network.NewVMNetwork(vmID, info.IP, m.logger)
+	return net.ExposePort(m.cfg.HostInterface, hostPort, vmPort, protocol)
+}
+
+// UnexposePort removes DNAT rules for the given hostPort on a VM.
+func (m *Manager) UnexposePort(vmID string, hostPort, vmPort int, protocol string) error {
+	m.mu.RLock()
+	info, ok := m.vms[vmID]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("VM %s not found or not running", vmID)
+	}
+	net := network.NewVMNetwork(vmID, info.IP, m.logger)
+	return net.UnexposePort(m.cfg.HostInterface, hostPort, vmPort, protocol)
+}
+
+// CleanupPortRules removes all port forwarding rules for a VM.
+func (m *Manager) CleanupPortRules(vmID string, rules []network.PortRule) {
+	m.mu.RLock()
+	info, ok := m.vms[vmID]
+	m.mu.RUnlock()
+	vmIP := ""
+	if ok {
+		vmIP = info.IP
+	} else {
+		vmIP = network.GetAllocatedIP(m.db, vmID)
+	}
+	if vmIP == "" {
+		return
+	}
+	net := network.NewVMNetwork(vmID, vmIP, m.logger)
+	net.CleanupPortRules(m.cfg.HostInterface, rules)
 }
 
 func (m *Manager) Exec(ctx context.Context, vmID, script string, timeoutSec int) (*ExecResult, error) {
@@ -237,28 +351,29 @@ func (m *Manager) unregisterVM(vmID string) {
 	delete(m.vms, vmID)
 }
 
-// waitForSSH polls TCP port 22 on the VM inside its network namespace.
-func (m *Manager) waitForSSH(namespaceName, vmIP string, timeout time.Duration) bool {
+// waitForSSH polls TCP port 22 on the VM. With the bridge architecture,
+// the VM has a unique IP reachable directly from the host.
+func (m *Manager) waitForSSH(vmIP string, timeout time.Duration) bool {
 	start := time.Now()
 	attempt := 0
+	var lastErr error
 	for time.Since(start) < timeout {
 		attempt++
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		cmd := execCommandContext(ctx, "ip", "netns", "exec", namespaceName,
-			"bash", "-c", fmt.Sprintf("echo > /dev/tcp/%s/22", vmIP))
-		err := cmd.Run()
-		cancel()
+		conn, err := net.DialTimeout("tcp", vmIP+":22", 500*time.Millisecond)
 		if err == nil {
+			conn.Close()
 			m.logger.Info("SSH ready",
-				zap.String("namespace", namespaceName),
+				zap.String("vm_ip", vmIP),
 				zap.Int("attempts", attempt),
 				zap.Duration("elapsed", time.Since(start)))
 			return true
 		}
+		lastErr = err
 		time.Sleep(100 * time.Millisecond)
 	}
 	m.logger.Warn("SSH readiness check timed out",
-		zap.String("namespace", namespaceName),
-		zap.Duration("timeout", timeout))
+		zap.String("vm_ip", vmIP),
+		zap.Duration("timeout", timeout),
+		zap.Error(lastErr))
 	return false
 }

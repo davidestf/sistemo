@@ -47,6 +47,9 @@ func vmCmd() *cobra.Command {
 	cmd.AddCommand(vmStatusCmd())
 	cmd.AddCommand(vmLogsCmd())
 	cmd.AddCommand(vmExecCmd())
+	cmd.AddCommand(vmSSHCmd())
+	cmd.AddCommand(vmExposeCmd())
+	cmd.AddCommand(vmUnexposeCmd())
 	return cmd
 }
 
@@ -66,6 +69,7 @@ func vmDeployCmd() *cobra.Command {
 	var memoryStr, storageStr string
 	var attach string
 	var name string
+	var expose []string
 	cmd := &cobra.Command{
 		Use:   "deploy <image> [flags]",
 		Short: "Deploy a VM",
@@ -83,7 +87,9 @@ Examples:
   sistemo vm deploy debian                          # auto-downloads if not cached
   sistemo vm deploy ./custom.rootfs.ext4            # local file
   sistemo vm deploy https://example.com/vm.ext4     # URL
-  sistemo vm deploy debian --name dev --vcpus 4 --memory 2G`,
+  sistemo vm deploy debian --name dev --vcpus 4 --memory 2G
+  sistemo vm deploy nginx --expose 80
+  sistemo vm deploy myapp --expose 8080:3000`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := getLogger(cmd)
@@ -114,7 +120,7 @@ Examples:
 					attachPaths = append(attachPaths, p)
 				}
 			}
-			runDeploy(getLogger(cmd), getDBFromCmd(cmd), imageArg, vcpus, memoryMB, storageMB, attachPaths, name)
+			runDeploy(getLogger(cmd), getDBFromCmd(cmd), imageArg, vcpus, memoryMB, storageMB, attachPaths, name, expose)
 			return nil
 		},
 	}
@@ -123,6 +129,7 @@ Examples:
 	cmd.Flags().StringVar(&storageStr, "storage", "2048", "storage: number (MB) or e.g. 10G, 10GB")
 	cmd.Flags().StringVar(&attach, "attach", "", "comma-separated volume IDs or names to attach as extra disks")
 	cmd.Flags().StringVar(&name, "name", "", "VM name (default: derived from image)")
+	cmd.Flags().StringSliceVar(&expose, "expose", nil, "expose ports: hostPort:vmPort or just port (repeatable)")
 	return cmd
 }
 
@@ -193,6 +200,19 @@ func vmLogsCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			runLogs(getLogger(cmd), getDBFromCmd(cmd), args[0])
+			return nil
+		},
+	}
+}
+
+func vmSSHCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "ssh <name|id>",
+		Short: "SSH into a VM",
+		Long:  "Open an interactive SSH session to a VM.\n\nExamples:\n  sistemo vm ssh myvm\n  sistemo vm ssh debian",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			runSSH(getLogger(cmd), getDBFromCmd(cmd), args[0])
 			return nil
 		},
 	}

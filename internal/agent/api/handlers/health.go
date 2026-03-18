@@ -62,9 +62,9 @@ func (h *Health) Ready(w http.ResponseWriter, r *http.Request) {
 
 func (h *Health) Info(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"architecture":   "namespace-isolation",
-		"vm_ip":          network.VMIP,
-		"gateway_ip":     network.GatewayIP,
+		"architecture":   "bridge",
+		"bridge":         network.BridgeName,
+		"bridge_ip":      network.BridgeIP,
 		"host_interface": h.cfg.HostInterface,
 		"go_version":     runtime.Version(),
 		"arch":           runtime.GOARCH,

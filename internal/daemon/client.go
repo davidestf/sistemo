@@ -156,6 +156,56 @@ func Health(baseURL string) error {
 	return nil
 }
 
+// ExposePort calls POST /vms/{vmID}/expose on the daemon.
+func ExposePort(baseURL, vmID string, hostPort, vmPort int, protocol string) error {
+	body := struct {
+		HostPort int    `json:"host_port"`
+		VMPort   int    `json:"vm_port"`
+		Protocol string `json:"protocol"`
+	}{HostPort: hostPort, VMPort: vmPort, Protocol: protocol}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/vms/"+vmID+"/expose", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("daemon request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var errBody bytes.Buffer
+		_, _ = errBody.ReadFrom(resp.Body)
+		return fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
+	}
+	return nil
+}
+
+// UnexposePort calls DELETE /vms/{vmID}/expose/{hostPort} on the daemon.
+func UnexposePort(baseURL, vmID string, hostPort int) error {
+	httpReq, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/vms/%s/expose/%d", baseURL, vmID, hostPort), nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("daemon request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var errBody bytes.Buffer
+		_, _ = errBody.ReadFrom(resp.Body)
+		return fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
+	}
+	return nil
+}
+
 // ExecResult is the response from POST /vms/{id}/exec.
 type ExecResult struct {
 	ExitCode int    `json:"exit_code"`

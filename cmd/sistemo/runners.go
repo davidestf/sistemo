@@ -30,6 +30,29 @@ import (
 	"github.com/davidestf/sistemo/internal/db"
 )
 
+// generateSSHKeyWithLock generates an SSH key at keyPath using flock to prevent races.
+func generateSSHKeyWithLock(sshDir, keyPath string) error {
+	os.MkdirAll(sshDir, 0700)
+	lockPath := keyPath + ".lock"
+	lockFile, err := os.Create(lockPath)
+	if err != nil {
+		return err
+	}
+	defer lockFile.Close()
+	defer os.Remove(lockPath)
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	if _, err := os.Stat(keyPath); err == nil {
+		return nil // already exists
+	}
+	out, err := exec.Command("ssh-keygen", "-t", "ed25519", "-f", keyPath, "-N", "", "-q").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ssh-keygen: %w (%s)", err, string(out))
+	}
+	return os.Chmod(keyPath, 0600)
+}
+
 func runInstall(logger *zap.Logger, dataDir string, upgrade bool) {
 	dataDir = getDataDir(dataDir)
 
@@ -49,11 +72,10 @@ func runInstall(logger *zap.Logger, dataDir string, upgrade bool) {
 	sshKeyPath := filepath.Join(dataDir, "ssh", "sistemo_key")
 	if _, err := os.Stat(sshKeyPath); os.IsNotExist(err) {
 		fmt.Print("Generating SSH key... ")
-		if out, err := exec.Command("ssh-keygen", "-t", "ed25519", "-f", sshKeyPath, "-N", "", "-q").CombinedOutput(); err != nil {
+		if err := generateSSHKeyWithLock(filepath.Join(dataDir, "ssh"), sshKeyPath); err != nil {
 			fmt.Println("failed")
-			logger.Fatal("generate SSH key", zap.Error(err), zap.String("output", string(out)))
+			logger.Fatal("generate SSH key", zap.Error(err))
 		}
-		os.Chmod(sshKeyPath, 0600)
 		fmt.Println("done")
 	} else {
 		fmt.Println("SSH key: already exists")
@@ -271,13 +293,8 @@ func runSshKey(logger *zap.Logger, dataDir string) {
 	sshDir := filepath.Join(dataDir, "ssh")
 	keyPath := filepath.Join(sshDir, "sistemo_key")
 	pubPath := keyPath + ".pub"
-	if err := os.MkdirAll(sshDir, 0700); err != nil {
-		logger.Fatal("create ssh dir", zap.Error(err))
-	}
-	if _, err := os.Stat(keyPath); os.IsNotExist(err) {
-		if out, err := exec.Command("ssh-keygen", "-t", "ed25519", "-f", keyPath, "-N", "", "-q").CombinedOutput(); err != nil {
-			logger.Fatal("generate SSH key", zap.Error(err), zap.String("output", string(out)))
-		}
+	if err := generateSSHKeyWithLock(sshDir, keyPath); err != nil {
+		logger.Fatal("generate SSH key", zap.Error(err))
 	}
 	pub, err := os.ReadFile(pubPath)
 	if err != nil {
@@ -298,13 +315,8 @@ func runBuild(logger *zap.Logger, dataDir, image, outPath string) {
 	sshDir := filepath.Join(dataDir, "ssh")
 	keyPath := filepath.Join(sshDir, "sistemo_key")
 	pubPath := keyPath + ".pub"
-	if err := os.MkdirAll(sshDir, 0700); err != nil {
-		logger.Fatal("create ssh dir", zap.Error(err))
-	}
-	if _, err := os.Stat(keyPath); os.IsNotExist(err) {
-		if out, err := exec.Command("ssh-keygen", "-t", "ed25519", "-f", keyPath, "-N", "", "-q").CombinedOutput(); err != nil {
-			logger.Fatal("generate SSH key", zap.Error(err), zap.String("output", string(out)))
-		}
+	if err := generateSSHKeyWithLock(sshDir, keyPath); err != nil {
+		logger.Fatal("generate SSH key", zap.Error(err))
 	}
 	if outPath == "" {
 		base := strings.TrimSuffix(filepath.Base(image), ":latest")
@@ -462,17 +474,10 @@ func runDaemon(logger *zap.Logger, dataDir string) {
 	}
 	os.Setenv("VM_BASE_DIR", filepath.Join(dataDir, "vms"))
 	os.Setenv("IMAGE_CACHE_DIR", filepath.Join(dataDir, "images"))
-	os.Setenv("PORT", "8080")
 	sshDir := filepath.Join(dataDir, "ssh")
 	sshKeyPath := filepath.Join(sshDir, "sistemo_key")
-	if err := os.MkdirAll(sshDir, 0700); err != nil {
-		logger.Fatal("create ssh dir", zap.Error(err))
-	}
-	if _, err := os.Stat(sshKeyPath); os.IsNotExist(err) {
-		if out, err := exec.Command("ssh-keygen", "-t", "ed25519", "-f", sshKeyPath, "-N", "", "-q").CombinedOutput(); err != nil {
-			logger.Fatal("generate SSH key", zap.Error(err), zap.String("output", string(out)))
-		}
-		logger.Info("generated SSH key for terminal/exec", zap.String("path", sshKeyPath), zap.String("pub", sshKeyPath+".pub"))
+	if err := generateSSHKeyWithLock(sshDir, sshKeyPath); err != nil {
+		logger.Fatal("generate SSH key", zap.Error(err))
 	}
 	// When running via sudo, chown the entire data directory to the invoking user
 	// so that non-sudo CLI commands (vm deploy, vm list, image build) can access the DB and files.
@@ -520,9 +525,13 @@ func runDaemon(logger *zap.Logger, dataDir string) {
 		os.Setenv("FIRECRACKER_BINARY_PATH", fc)
 		logger.Info("using Firecracker binary", zap.String("path", fc))
 	}
-	cfg, err := config.Load()
+	configFilePath := filepath.Join(dataDir, "config.yml")
+	cfg, err := config.LoadWithFile(configFilePath)
 	if err != nil {
 		logger.Fatal("load agent config", zap.Error(err))
+	}
+	if _, statErr := os.Stat(configFilePath); statErr == nil {
+		logger.Info("loaded config file", zap.String("path", configFilePath))
 	}
 	database, err := db.New(dataDir)
 	if err != nil {
@@ -546,6 +555,8 @@ func runDaemon(logger *zap.Logger, dataDir string) {
 			for _, id := range staleIDs {
 				vmDir := filepath.Join(dataDir, "vms", id)
 				os.RemoveAll(vmDir)
+				database.Exec(`DELETE FROM ip_allocation WHERE vm_id = ?`, id)
+				database.Exec(`DELETE FROM port_rule WHERE vm_id = ?`, id)
 				database.Exec(`DELETE FROM vm WHERE id = ?`, id)
 			}
 			if len(staleIDs) > 0 {
@@ -557,7 +568,7 @@ func runDaemon(logger *zap.Logger, dataDir string) {
 	if syscall.Geteuid() != 0 {
 		logger.Warn("daemon running as non-root — VM create will fail (mount/namespace need root). Stop and run: sudo ./sistemo up")
 	}
-	mgr := vm.NewManager(cfg, logger)
+	mgr := vm.NewManager(cfg, logger, database)
 	router := api.NewRouter(cfg, mgr, logger, database)
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
@@ -730,7 +741,7 @@ func resolveImage(logger *zap.Logger, dataDir, image string) string {
 	return dest
 }
 
-func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memoryMB, storageMB int, attachPaths []string, nameOverride string) {
+func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memoryMB, storageMB int, attachPaths []string, nameOverride string, exposePorts []string) {
 	if !filepath.IsAbs(image) && !strings.HasPrefix(image, "http://") && !strings.HasPrefix(image, "https://") {
 		if abs, err := filepath.Abs(image); err == nil {
 			if _, err := os.Stat(abs); err == nil {
@@ -787,6 +798,20 @@ func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memory
 	fmt.Printf("Deployed %q as %s (%s)\n", image, name, resp.VMID)
 	fmt.Printf("  IP: %s  Namespace: %s  Boot: %dms\n", resp.IPAddress, resp.Namespace, resp.BootTimeMS)
 	fmt.Printf("  Terminal: %s/terminals/vm/%s\n", baseURL, resp.VMID)
+
+	// Expose ports if requested
+	for _, portSpec := range exposePorts {
+		hostPort, vmPort, err := parsePortMapping(portSpec)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: invalid port spec %q: %v\n", portSpec, err)
+			continue
+		}
+		if err := daemon.ExposePort(baseURL, resp.VMID, hostPort, vmPort, "tcp"); err != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: expose port %d: %v\n", hostPort, err)
+			continue
+		}
+		fmt.Printf("  Exposed host:%d → VM:%d (tcp)\n", hostPort, vmPort)
+	}
 }
 
 func parseSizeMB(s string) (int, error) {
@@ -1162,7 +1187,7 @@ func openBrowser(url string) {
 
 func runStatus(logger *zap.Logger, database *sql.DB, nameOrID string) {
 	row := database.QueryRow(
-		"SELECT id, name, status, image, ip_address, namespace, created_at FROM vm WHERE id = ? OR name = ? LIMIT 1",
+		"SELECT id, name, status, image, ip_address, namespace, created_at FROM vm WHERE (id = ? OR name = ?) AND status != 'destroyed' ORDER BY created_at DESC LIMIT 1",
 		nameOrID, nameOrID,
 	)
 	var id, name, status, image, ip, ns, created sql.NullString
@@ -1180,6 +1205,24 @@ func runStatus(logger *zap.Logger, database *sql.DB, nameOrID string) {
 	fmt.Printf("IP:       %s\n", ip.String)
 	fmt.Printf("Namespace: %s\n", ns.String)
 	fmt.Printf("Created:  %s\n", created.String)
+
+	// Show exposed ports
+	portRows, err := database.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", id.String)
+	if err == nil {
+		defer portRows.Close()
+		first := true
+		for portRows.Next() {
+			var hp, vp int
+			var proto string
+			if portRows.Scan(&hp, &vp, &proto) == nil {
+				if first {
+					fmt.Printf("Ports:\n")
+					first = false
+				}
+				fmt.Printf("  host:%d → VM:%d (%s)\n", hp, vp, proto)
+			}
+		}
+	}
 }
 
 func runLogs(logger *zap.Logger, database *sql.DB, nameOrID string) {
@@ -1206,6 +1249,48 @@ func runLogs(logger *zap.Logger, database *sql.DB, nameOrID string) {
 	io.Copy(os.Stdout, resp.Body)
 }
 
+func runSSH(logger *zap.Logger, database *sql.DB, nameOrID string) {
+	var vmID string
+	var ip sql.NullString
+	err := database.QueryRow(
+		"SELECT id, ip_address FROM vm WHERE (id = ? OR name = ?) AND status NOT IN ('destroyed', 'error', 'failed') LIMIT 1",
+		nameOrID, nameOrID,
+	).Scan(&vmID, &ip)
+	if err == sql.ErrNoRows {
+		logger.Fatal("VM not found or not running", zap.String("name_or_id", nameOrID))
+	}
+	if err != nil {
+		logger.Fatal("lookup vm", zap.Error(err))
+	}
+	if !ip.Valid || ip.String == "" {
+		logger.Fatal("VM has no IP address", zap.String("vm_id", vmID))
+	}
+
+	dataDir := getDataDir("")
+	sshKeyPath := filepath.Join(dataDir, "ssh", "sistemo_key")
+
+	sshArgs := []string{
+		"-i", sshKeyPath,
+		"-o", "StrictHostKeyChecking=no",
+		"-o", "UserKnownHostsFile=/dev/null",
+		"-o", "LogLevel=ERROR",
+		"-o", "SendEnv=-*",
+		"-o", "SetEnv=LANG=C",
+		fmt.Sprintf("root@%s", ip.String),
+	}
+
+	cmd := exec.Command("ssh", sshArgs...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		logger.Fatal("ssh", zap.Error(err))
+	}
+}
+
 func runExec(logger *zap.Logger, database *sql.DB, nameOrID, command string) {
 	var vmID string
 	err := database.QueryRow(
@@ -1219,7 +1304,7 @@ func runExec(logger *zap.Logger, database *sql.DB, nameOrID, command string) {
 		logger.Fatal("lookup vm", zap.Error(err))
 	}
 	baseURL := daemon.URL()
-	result, err := daemon.Exec(baseURL, vmID, command, 30)
+	result, err := daemon.Exec(baseURL, vmID, command, 120)
 	if err != nil {
 		logger.Fatal("exec", zap.Error(err))
 	}

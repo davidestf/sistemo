@@ -5,15 +5,19 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+
 	"github.com/davidestf/sistemo/internal/agent/config"
+	"github.com/davidestf/sistemo/internal/agent/network"
 	"github.com/davidestf/sistemo/internal/agent/vm"
 	"go.uber.org/zap"
 )
@@ -164,8 +168,21 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
+// validVMID extracts and validates the vmID URL parameter. Returns empty string on failure (response already written).
+func validVMID(w http.ResponseWriter, r *http.Request) string {
 	vmID := chi.URLParam(r, "vmID")
+	if !isValidSafeID(vmID) {
+		writeError(w, http.StatusBadRequest, "invalid vm id")
+		return ""
+	}
+	return vmID
+}
+
+func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
+	vmID := validVMID(w, r)
+	if vmID == "" {
+		return
+	}
 	q := r.URL.Query()
 	preserveStorage := q.Get("preserve_storage") == "true" || q.Get("preserve_storage") == "1"
 
@@ -178,6 +195,7 @@ func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
 	if h.db != nil {
 		h.db.Exec("UPDATE vm SET status = 'destroyed', last_state_change = ? WHERE id = ?",
 			time.Now().UTC().Format(time.RFC3339), vmID)
+		h.db.Exec("DELETE FROM port_rule WHERE vm_id = ?", vmID)
 	}
 	if !terminated {
 		writeJSON(w, http.StatusNotFound, vm.DeleteResponse{VMID: vmID, Terminated: false})
@@ -187,7 +205,11 @@ func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *VM) Stop(w http.ResponseWriter, r *http.Request) {
-	vmID := chi.URLParam(r, "vmID")
+	vmID := validVMID(w, r)
+	if vmID == "" {
+		return
+	}
+
 	stopped, err := h.mgr.Stop(r.Context(), vmID)
 	if err != nil {
 		h.logger.Error("stop VM failed", zap.String("vm_id", vmID), zap.Error(err))
@@ -197,6 +219,8 @@ func (h *VM) Stop(w http.ResponseWriter, r *http.Request) {
 	if stopped && h.db != nil {
 		h.db.Exec("UPDATE vm SET status = 'stopped', last_state_change = ? WHERE id = ?",
 			time.Now().UTC().Format(time.RFC3339), vmID)
+		// Port rule DB rows are kept so restorePortRules can re-apply them on start.
+		// The iptables rules were already removed by stopVM.
 	}
 	if !stopped {
 		writeJSON(w, http.StatusNotFound, map[string]interface{}{"vm_id": vmID, "stopped": false})
@@ -206,7 +230,10 @@ func (h *VM) Stop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *VM) Start(w http.ResponseWriter, r *http.Request) {
-	vmID := chi.URLParam(r, "vmID")
+	vmID := validVMID(w, r)
+	if vmID == "" {
+		return
+	}
 	result, err := h.mgr.Start(r.Context(), vmID)
 	if err != nil {
 		h.logger.Error("start VM failed", zap.String("vm_id", vmID), zap.Error(err))
@@ -221,7 +248,10 @@ func (h *VM) Start(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *VM) GetIP(w http.ResponseWriter, r *http.Request) {
-	vmID := chi.URLParam(r, "vmID")
+	vmID := validVMID(w, r)
+	if vmID == "" {
+		return
+	}
 	result := h.mgr.GetIP(r.Context(), vmID)
 	writeJSON(w, http.StatusOK, result)
 }
@@ -232,7 +262,10 @@ func (h *VM) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *VM) Exec(w http.ResponseWriter, r *http.Request) {
-	vmID := chi.URLParam(r, "vmID")
+	vmID := validVMID(w, r)
+	if vmID == "" {
+		return
+	}
 
 	var body struct {
 		Script     string `json:"script"`
@@ -257,13 +290,12 @@ func (h *VM) Exec(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *VM) Logs(w http.ResponseWriter, r *http.Request) {
-	vmID := chi.URLParam(r, "vmID")
+	vmID := validVMID(w, r)
 	if vmID == "" {
-		writeError(w, http.StatusNotFound, "vm id required")
 		return
 	}
 	logPath := filepath.Join(h.cfg.VMBaseDir, vmID, "firecracker.log")
-	data, err := os.ReadFile(logPath)
+	f, err := os.Open(logPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			writeError(w, http.StatusNotFound, "VM not found or no log file")
@@ -273,7 +305,133 @@ func (h *VM) Logs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	defer f.Close()
+
+	// Stream the last 1MB if file is larger
+	const maxBytes = 1 << 20 // 1MB
+	info, _ := f.Stat()
+	if info != nil && info.Size() > maxBytes {
+		f.Seek(-maxBytes, io.SeekEnd)
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write(data)
+	io.Copy(w, f)
+}
+
+// Expose handles POST /vms/{vmID}/expose — adds a port forwarding rule.
+func (h *VM) Expose(w http.ResponseWriter, r *http.Request) {
+	vmID := validVMID(w, r)
+	if vmID == "" {
+		return
+	}
+	var req struct {
+		HostPort int    `json:"host_port"`
+		VMPort   int    `json:"vm_port"`
+		Protocol string `json:"protocol"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if req.HostPort < 1 || req.HostPort > 65535 {
+		writeError(w, http.StatusBadRequest, "host_port must be 1-65535")
+		return
+	}
+	if req.VMPort < 1 || req.VMPort > 65535 {
+		writeError(w, http.StatusBadRequest, "vm_port must be 1-65535")
+		return
+	}
+	if req.Protocol == "" {
+		req.Protocol = "tcp"
+	}
+	if req.Protocol != "tcp" && req.Protocol != "udp" {
+		writeError(w, http.StatusBadRequest, "protocol must be tcp or udp")
+		return
+	}
+
+	if !network.IsPortAvailable(req.HostPort, req.Protocol) {
+		writeError(w, http.StatusConflict, fmt.Sprintf("host port %d/%s is already in use", req.HostPort, req.Protocol))
+		return
+	}
+
+	// Claim the port in DB first (UNIQUE index prevents races between concurrent requests)
+	var ruleID string
+	if h.db != nil {
+		ruleID = uuid.NewString()
+		_, err := h.db.Exec(
+			`INSERT INTO port_rule (id, vm_id, host_port, vm_port, protocol) VALUES (?, ?, ?, ?, ?)`,
+			ruleID, vmID, req.HostPort, req.VMPort, req.Protocol,
+		)
+		if err != nil {
+			writeError(w, http.StatusConflict, fmt.Sprintf("host port %d/%s is already exposed", req.HostPort, req.Protocol))
+			return
+		}
+	}
+
+	// Now apply iptables rules — rollback DB if this fails
+	if err := h.mgr.ExposePort(vmID, req.HostPort, req.VMPort, req.Protocol); err != nil {
+		if h.db != nil {
+			h.db.Exec(`DELETE FROM port_rule WHERE id = ?`, ruleID)
+		}
+		h.logger.Error("expose port failed", zap.String("vm_id", vmID), zap.Error(err))
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"vm_id":     vmID,
+		"host_port": req.HostPort,
+		"vm_port":   req.VMPort,
+		"protocol":  req.Protocol,
+		"status":    "exposed",
+	})
+}
+
+// Unexpose handles DELETE /vms/{vmID}/expose/{hostPort} — removes a port forwarding rule.
+func (h *VM) Unexpose(w http.ResponseWriter, r *http.Request) {
+	vmID := validVMID(w, r)
+	if vmID == "" {
+		return
+	}
+	hostPortStr := chi.URLParam(r, "hostPort")
+	hostPort, err := strconv.Atoi(hostPortStr)
+	if err != nil || hostPort < 1 || hostPort > 65535 {
+		writeError(w, http.StatusBadRequest, "invalid host port")
+		return
+	}
+
+	// Look up the rule in DB to get vmPort and protocol
+	var vmPort int
+	var protocol string
+	if h.db != nil {
+		err := h.db.QueryRow(
+			`SELECT vm_port, protocol FROM port_rule WHERE vm_id = ? AND host_port = ?`,
+			vmID, hostPort,
+		).Scan(&vmPort, &protocol)
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "port rule not found")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	if err := h.mgr.UnexposePort(vmID, hostPort, vmPort, protocol); err != nil {
+		h.logger.Error("unexpose port failed", zap.String("vm_id", vmID), zap.Error(err))
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Remove from DB
+	if h.db != nil {
+		h.db.Exec(`DELETE FROM port_rule WHERE vm_id = ? AND host_port = ?`, vmID, hostPort)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"vm_id":     vmID,
+		"host_port": hostPort,
+		"status":    "removed",
+	})
 }

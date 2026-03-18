@@ -33,7 +33,7 @@ func New(dataDir string) (*sql.DB, error) {
 	}
 
 	dbPath := filepath.Join(dataDir, dbFileName)
-	dsn := dbPath + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
+	dsn := dbPath + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)

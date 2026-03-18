@@ -17,7 +17,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"github.com/davidestf/sistemo/internal/agent/config"
-	"github.com/davidestf/sistemo/internal/agent/network"
 	"github.com/davidestf/sistemo/internal/agent/vm"
 	"go.uber.org/zap"
 )
@@ -169,9 +168,6 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 		ns = h.getNamespaceFromDB(vmID)
 	}
 	vmip := h.mgr.GetVMIP(vmID)
-	if vmip == "" && ns != "" {
-		vmip = network.VMIP
-	}
 	if ns == "" || vmip == "" {
 		writeError(w, http.StatusNotFound, "VM not found or not running")
 		return
@@ -211,7 +207,6 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("terminal initial size", zap.Uint16("rows", initialRows), zap.Uint16("cols", initialCols))
 
 	sshArgs := []string{
-		"netns", "exec", ns, "ssh",
 		"-i", h.cfg.SSHKeyPath,
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
@@ -228,7 +223,7 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("%s@%s", h.cfg.SSHUser, vmip),
 	}
 
-	sshCmd := exec.Command("ip", sshArgs...)
+	sshCmd := exec.Command("ssh", sshArgs...)
 	// LANG/LC_ALL=C avoids "cannot change locale (en_GB.UTF-8)" in minimal VM images that don't have that locale generated.
 	sshCmd.Env = append(os.Environ(), "TERM=xterm-256color", "LANG=C", "LC_ALL=C")
 
