@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
@@ -27,8 +26,7 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := getLogger(cmd)
 			db := getDBFromCmd(cmd)
-			runExpose(logger, db, args[0], portFlag)
-			return nil
+			return runExpose(logger, db, args[0], portFlag)
 		},
 	}
 	cmd.Flags().StringVar(&portFlag, "port", "", "port mapping: hostPort:vmPort or just port (required)")
@@ -45,8 +43,7 @@ func vmUnexposeCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := getLogger(cmd)
 			db := getDBFromCmd(cmd)
-			runUnexpose(logger, db, args[0], portFlag)
-			return nil
+			return runUnexpose(logger, db, args[0], portFlag)
 		},
 	}
 	cmd.Flags().IntVar(&portFlag, "port", 0, "host port to unexpose (required)")
@@ -79,51 +76,46 @@ func parsePortMapping(s string) (hostPort, vmPort int, err error) {
 	return hostPort, vmPort, nil
 }
 
-func runExpose(logger *zap.Logger, database *sql.DB, nameOrID, portSpec string) {
+func runExpose(logger *zap.Logger, database *sql.DB, nameOrID, portSpec string) error {
 	hostPort, vmPort, err := parsePortMapping(portSpec)
 	if err != nil {
-		logger.Fatal("invalid port spec", zap.Error(err))
+		return fmt.Errorf("invalid port spec: %w", err)
 	}
 
 	baseURL := daemon.URL()
 	if err := daemon.Health(baseURL); err != nil {
-		logger.Fatal("daemon not reachable (run 'sistemo up' first)", zap.String("url", baseURL), zap.Error(err))
+		return fmt.Errorf("daemon not reachable (run 'sistemo up' first): %w", err)
 	}
 
-	vmID := resolveVMID(database, nameOrID)
+	vmID, err := resolveVMID(database, nameOrID)
+	if err != nil {
+		return err
+	}
 	if err := daemon.ExposePort(baseURL, vmID, hostPort, vmPort, "tcp"); err != nil {
-		logger.Fatal("expose port", zap.Error(err))
+		return fmt.Errorf("expose port: %w", err)
 	}
 	fmt.Printf("Exposed host:%d → VM:%d (tcp) on %s\n", hostPort, vmPort, vmID)
+	return nil
 }
 
-func runUnexpose(logger *zap.Logger, database *sql.DB, nameOrID string, hostPort int) {
+func runUnexpose(logger *zap.Logger, database *sql.DB, nameOrID string, hostPort int) error {
 	baseURL := daemon.URL()
 	if err := daemon.Health(baseURL); err != nil {
-		logger.Fatal("daemon not reachable (run 'sistemo up' first)", zap.String("url", baseURL), zap.Error(err))
+		return fmt.Errorf("daemon not reachable (run 'sistemo up' first): %w", err)
 	}
 
-	vmID := resolveVMID(database, nameOrID)
+	vmID, err := resolveVMID(database, nameOrID)
+	if err != nil {
+		return err
+	}
 	if err := daemon.UnexposePort(baseURL, vmID, hostPort); err != nil {
-		logger.Fatal("unexpose port", zap.Error(err))
+		return fmt.Errorf("unexpose port: %w", err)
 	}
 	fmt.Printf("Removed port expose for host:%d on %s\n", hostPort, vmID)
+	return nil
 }
 
 // resolveVMID looks up a VM by name or ID and returns its ID.
-func resolveVMID(database *sql.DB, nameOrID string) string {
-	var vmID string
-	err := database.QueryRow(
-		"SELECT id FROM vm WHERE (id = ? OR name = ?) AND status NOT IN ('destroyed', 'error', 'failed') LIMIT 1",
-		nameOrID, nameOrID,
-	).Scan(&vmID)
-	if err == sql.ErrNoRows {
-		fmt.Fprintf(os.Stderr, "VM %q not found or not running\n", nameOrID)
-		os.Exit(1)
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "lookup VM: %v\n", err)
-		os.Exit(1)
-	}
-	return vmID
+func resolveVMID(database *sql.DB, nameOrID string) (string, error) {
+	return lookupVM(database, nameOrID, "destroyed", "error", "failed")
 }

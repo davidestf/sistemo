@@ -3,6 +3,7 @@ package network
 import (
 	"database/sql"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 )
@@ -43,25 +44,35 @@ func AllocateIP(db *sql.DB, vmID string) (string, error) {
 		return "", fmt.Errorf("scan ip_allocation: %w", err)
 	}
 
-	// Find first free IP: 10.200.0.2 through 10.200.255.254
-	for third := 0; third <= 255; third++ {
-		for fourth := 2; fourth <= 254; fourth++ {
-			ip := fmt.Sprintf("10.200.%d.%d", third, fourth)
-			if !allocated[ip] {
-				now := time.Now().UTC().Format(time.RFC3339)
-				_, err := tx.Exec(
-					"INSERT INTO ip_allocation (ip, vm_id, allocated_at) VALUES (?, ?, ?)",
-					ip, vmID, now,
-				)
-				if err != nil {
-					// UNIQUE constraint violation = another transaction won the race, retry
-					continue
-				}
-				if err := tx.Commit(); err != nil {
-					return "", fmt.Errorf("commit ip_allocation: %w", err)
-				}
-				return ip, nil
+	// Use the parsed bridge subnet for IP iteration.
+	// Fallback to 10.200.0.0/16 if not yet parsed (should not happen in normal flow).
+	subnet := bridgeIPNet
+	if subnet == nil {
+		_, subnet, _ = net.ParseCIDR(DefaultBridgeSubnet)
+	}
+	baseIP := subnet.IP.To4()
+	ones, bits := subnet.Mask.Size()
+	hostBits := bits - ones
+	maxHosts := (1 << hostBits) - 2
+	baseU32 := uint32(baseIP[0])<<24 | uint32(baseIP[1])<<16 | uint32(baseIP[2])<<8 | uint32(baseIP[3])
+
+	for i := 2; i <= maxHosts; i++ {
+		u := baseU32 + uint32(i)
+		candidate := net.IP{byte(u >> 24), byte(u >> 16), byte(u >> 8), byte(u)}
+		ipStr := candidate.String()
+		if !allocated[ipStr] {
+			now := time.Now().UTC().Format(time.RFC3339)
+			_, err := tx.Exec(
+				"INSERT INTO ip_allocation (ip, vm_id, allocated_at) VALUES (?, ?, ?)",
+				ipStr, vmID, now,
+			)
+			if err != nil {
+				continue // UNIQUE constraint violation, try next
 			}
+			if err := tx.Commit(); err != nil {
+				return "", fmt.Errorf("commit ip_allocation: %w", err)
+			}
+			return ipStr, nil
 		}
 	}
 	return "", fmt.Errorf("no free IPs in %s", BridgeCIDR)
@@ -80,6 +91,80 @@ func ReleaseIP(db *sql.DB, vmID string) error {
 		return nil // no IP was allocated, not an error
 	}
 	return nil
+}
+
+// AllocateIPInSubnet allocates an IP from a specific subnet (for named networks).
+// The subnet must be a valid CIDR like "10.201.0.0/24".
+func AllocateIPInSubnet(db *sql.DB, vmID, cidr string) (string, error) {
+	if db == nil {
+		return "", fmt.Errorf("database required for IP allocation")
+	}
+
+	_, ipNet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return "", fmt.Errorf("invalid subnet %q: %w", cidr, err)
+	}
+
+	ipAllocMu.Lock()
+	defer ipAllocMu.Unlock()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return "", fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query("SELECT ip FROM ip_allocation ORDER BY ip")
+	if err != nil {
+		return "", fmt.Errorf("query ip_allocation: %w", err)
+	}
+	allocated := make(map[string]bool)
+	for rows.Next() {
+		var ip string
+		if rows.Scan(&ip) == nil {
+			allocated[ip] = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("scan ip_allocation: %w", err)
+	}
+
+	// Iterate through the subnet using 32-bit arithmetic to avoid byte overflow.
+	// Skip .0 (network) and .1 (gateway), start from .2.
+	baseIP := ipNet.IP.To4()
+	ones, bits := ipNet.Mask.Size()
+	hostBits := bits - ones
+	maxHosts := (1 << hostBits) - 2 // exclude network and broadcast
+
+	baseU32 := uint32(baseIP[0])<<24 | uint32(baseIP[1])<<16 | uint32(baseIP[2])<<8 | uint32(baseIP[3])
+
+	for i := 2; i <= maxHosts; i++ {
+		u := baseU32 + uint32(i)
+		candidate := net.IP{byte(u >> 24), byte(u >> 16), byte(u >> 8), byte(u)}
+		ipStr := candidate.String()
+
+		if !ipNet.Contains(candidate) {
+			continue
+		}
+		if allocated[ipStr] {
+			continue
+		}
+
+		now := time.Now().UTC().Format(time.RFC3339)
+		_, err := tx.Exec(
+			"INSERT INTO ip_allocation (ip, vm_id, allocated_at) VALUES (?, ?, ?)",
+			ipStr, vmID, now,
+		)
+		if err != nil {
+			continue // UNIQUE constraint violation, try next
+		}
+		if err := tx.Commit(); err != nil {
+			return "", fmt.Errorf("commit ip_allocation: %w", err)
+		}
+		return ipStr, nil
+	}
+	return "", fmt.Errorf("no free IPs in %s", cidr)
 }
 
 // GetAllocatedIP returns the IP currently allocated to vmID, or empty string if none.

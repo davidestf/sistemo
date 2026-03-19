@@ -16,6 +16,9 @@ type CreateRequest struct {
 	DiskBWMbps      int               `json:"disk_bw_mbps,omitempty"`
 	// InjectInitSSH: inject /init and SSH key into rootfs so terminal/exec work.
 	InjectInitSSH bool `json:"inject_init_ssh,omitempty"`
+	// Named network: if set, VM is attached to this bridge instead of sistemo0.
+	NetworkBridge string `json:"network_bridge,omitempty"`
+	NetworkSubnet string `json:"network_subnet,omitempty"`
 }
 
 // CreateResponse is returned after VM creation.
@@ -33,11 +36,12 @@ type CreateResponse struct {
 
 // VMInfo holds runtime information about a VM.
 type VMInfo struct {
-	VMID      string `json:"vm_id"`
-	PID       int    `json:"pid"`
-	Namespace string `json:"namespace"`
-	IP        string `json:"ip"`
-	Status    string `json:"status"`
+	VMID          string `json:"vm_id"`
+	PID           int    `json:"pid"`
+	Namespace     string `json:"namespace"`
+	IP            string `json:"ip"`
+	Status        string `json:"status"`
+	NetworkBridge string `json:"network_bridge,omitempty"` // empty = sistemo0 (default)
 }
 
 // ExecResult holds the result of command execution on a VM.

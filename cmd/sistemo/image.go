@@ -31,8 +31,7 @@ func imagePullCmd() *cobra.Command {
 		Long:  "Downloads an image from the Sistemo registry to ~/.sistemo/images/. Override the registry with SISTEMO_REGISTRY_URL.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			runImagePull(getLogger(cmd), getDataDirFromCmd(cmd), args[0])
-			return nil
+			return runImagePull(getLogger(cmd), getDataDirFromCmd(cmd), args[0])
 		},
 	}
 }
@@ -55,8 +54,7 @@ Examples:
 			if len(args) >= 2 {
 				outPath = args[1]
 			}
-			runBuild(getLogger(cmd), getDataDirFromCmd(cmd), image, outPath)
-			return nil
+			return runBuild(getLogger(cmd), getDataDirFromCmd(cmd), image, outPath)
 		},
 	}
 }

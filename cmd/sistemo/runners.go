@@ -30,6 +30,15 @@ import (
 	"github.com/davidestf/sistemo/internal/db"
 )
 
+// ExitError is returned when a command wants to exit with a specific code (e.g. SSH forwarding).
+type ExitError struct {
+	Code int
+}
+
+func (e *ExitError) Error() string {
+	return fmt.Sprintf("exit status %d", e.Code)
+}
+
 // generateSSHKeyWithLock generates an SSH key at keyPath using flock to prevent races.
 func generateSSHKeyWithLock(sshDir, keyPath string) error {
 	os.MkdirAll(sshDir, 0700)
@@ -53,14 +62,14 @@ func generateSSHKeyWithLock(sshDir, keyPath string) error {
 	return os.Chmod(keyPath, 0600)
 }
 
-func runInstall(logger *zap.Logger, dataDir string, upgrade bool) {
+func runInstall(logger *zap.Logger, dataDir string, upgrade bool) error {
 	dataDir = getDataDir(dataDir)
 
 	// Create directory structure
 	for _, sub := range []string{"", "bin", "kernel", "ssh", "vms", "images", "volumes"} {
 		dir := filepath.Join(dataDir, sub)
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			logger.Fatal("create dir", zap.String("dir", dir), zap.Error(err))
+			return fmt.Errorf("create dir %s: %w", dir, err)
 		}
 	}
 	// SSH dir needs restricted perms
@@ -74,7 +83,7 @@ func runInstall(logger *zap.Logger, dataDir string, upgrade bool) {
 		fmt.Print("Generating SSH key... ")
 		if err := generateSSHKeyWithLock(filepath.Join(dataDir, "ssh"), sshKeyPath); err != nil {
 			fmt.Println("failed")
-			logger.Fatal("generate SSH key", zap.Error(err))
+			return fmt.Errorf("generate SSH key: %w", err)
 		}
 		fmt.Println("done")
 	} else {
@@ -156,6 +165,7 @@ func runInstall(logger *zap.Logger, dataDir string, upgrade bool) {
 	fmt.Println("  3. Open terminal:     sistemo vm terminal debian")
 	fmt.Println()
 	fmt.Println("To update Firecracker/kernel later: sistemo install --upgrade")
+	return nil
 }
 
 func fileExists(path string) bool {
@@ -288,13 +298,13 @@ func downloadAndExtractFirecracker(url, destBin, version, arch string) error {
 	return nil
 }
 
-func runSshKey(logger *zap.Logger, dataDir string) {
+func runSshKey(logger *zap.Logger, dataDir string) error {
 	dataDir = getDataDir(dataDir)
 	sshDir := filepath.Join(dataDir, "ssh")
 	keyPath := filepath.Join(sshDir, "sistemo_key")
 	pubPath := keyPath + ".pub"
 	if err := generateSSHKeyWithLock(sshDir, keyPath); err != nil {
-		logger.Fatal("generate SSH key", zap.Error(err))
+		return fmt.Errorf("generate SSH key: %w", err)
 	}
 	pub, err := os.ReadFile(pubPath)
 	if err != nil {
@@ -302,21 +312,22 @@ func runSshKey(logger *zap.Logger, dataDir string) {
 			fmt.Fprintln(os.Stderr, "Cannot read SSH key (created by daemon as root). Run the daemon once with sudo so it can fix ownership:")
 			fmt.Fprintln(os.Stderr, "  sudo ./sistemo up   # then Ctrl+C; or: sudo chown -R $USER ~/.sistemo/ssh")
 		}
-		logger.Fatal("read public key", zap.Error(err))
+		return fmt.Errorf("read public key: %w", err)
 	}
 	fmt.Print(string(pub))
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "# Add the line above to your VM's /root/.ssh/authorized_keys so the terminal works.")
 	fmt.Fprintln(os.Stderr, "# When running the daemon as root, use the same data dir: sudo ./sistemo up --data-dir=$HOME/.sistemo")
+	return nil
 }
 
-func runBuild(logger *zap.Logger, dataDir, image, outPath string) {
+func runBuild(logger *zap.Logger, dataDir, image, outPath string) error {
 	dataDir = getDataDir(dataDir)
 	sshDir := filepath.Join(dataDir, "ssh")
 	keyPath := filepath.Join(sshDir, "sistemo_key")
 	pubPath := keyPath + ".pub"
 	if err := generateSSHKeyWithLock(sshDir, keyPath); err != nil {
-		logger.Fatal("generate SSH key", zap.Error(err))
+		return fmt.Errorf("generate SSH key: %w", err)
 	}
 	if outPath == "" {
 		base := strings.TrimSuffix(filepath.Base(image), ":latest")
@@ -332,24 +343,24 @@ func runBuild(logger *zap.Logger, dataDir, image, outPath string) {
 	// Write embedded scripts to a temp dir
 	tmpDir, err := os.MkdirTemp("", "sistemo-build-*")
 	if err != nil {
-		logger.Fatal("create temp dir", zap.Error(err))
+		return fmt.Errorf("create temp dir: %w", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
 	buildScript := filepath.Join(tmpDir, "build-rootfs.sh")
 	if err := os.WriteFile(buildScript, embeddedBuildScript, 0755); err != nil {
-		logger.Fatal("write build script", zap.Error(err))
+		return fmt.Errorf("write build script: %w", err)
 	}
 	vmInitScript := filepath.Join(tmpDir, "vm-init.sh")
 	if err := os.WriteFile(vmInitScript, embeddedVMInit, 0755); err != nil {
-		logger.Fatal("write vm-init script", zap.Error(err))
+		return fmt.Errorf("write vm-init script: %w", err)
 	}
 
 	cmd := exec.Command("bash", buildScript, image, pubPath, outPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		logger.Fatal("build failed", zap.Error(err))
+		return fmt.Errorf("build failed: %w", err)
 	}
 	// When running via sudo, chown the built image to the invoking user
 	if syscall.Geteuid() == 0 && os.Getenv("SUDO_UID") != "" {
@@ -364,6 +375,7 @@ func runBuild(logger *zap.Logger, dataDir, image, outPath string) {
 	base = strings.TrimSuffix(base, ".ext4")
 	fmt.Printf("Built %s\n", outPath)
 	fmt.Printf("Deploy with: sistemo vm deploy %s\n", base)
+	return nil
 }
 
 func resolveFirecrackerBin(dataDir string) string {
@@ -452,7 +464,7 @@ func findKernelInDir(dir string) string {
 	return abs
 }
 
-func runDaemon(logger *zap.Logger, dataDir string) {
+func runDaemon(logger *zap.Logger, dataDir string) error {
 	dataDir = getDataDir(dataDir)
 	if syscall.Geteuid() == 0 && os.Getenv("SUDO_USER") != "" {
 		rootSistemo := filepath.Join("/root", ".sistemo")
@@ -470,14 +482,15 @@ func runDaemon(logger *zap.Logger, dataDir string) {
 		dataDir = filepath.Join(home, ".sistemo")
 	}
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		logger.Fatal("create data dir", zap.Error(err))
+		return fmt.Errorf("create data dir: %w", err)
 	}
-	os.Setenv("VM_BASE_DIR", filepath.Join(dataDir, "vms"))
-	os.Setenv("IMAGE_CACHE_DIR", filepath.Join(dataDir, "images"))
+	// Resolve paths that will be set on the config struct after loading.
+	vmBaseDir := filepath.Join(dataDir, "vms")
+	imageCacheDir := filepath.Join(dataDir, "images")
 	sshDir := filepath.Join(dataDir, "ssh")
 	sshKeyPath := filepath.Join(sshDir, "sistemo_key")
 	if err := generateSSHKeyWithLock(sshDir, sshKeyPath); err != nil {
-		logger.Fatal("generate SSH key", zap.Error(err))
+		return fmt.Errorf("generate SSH key: %w", err)
 	}
 	// When running via sudo, chown the entire data directory to the invoking user
 	// so that non-sudo CLI commands (vm deploy, vm list, image build) can access the DB and files.
@@ -495,47 +508,74 @@ func runDaemon(logger *zap.Logger, dataDir string) {
 			}
 		}
 	}
-	os.Setenv("SSH_KEY_PATH", sshKeyPath)
-	if p := os.Getenv("KERNEL_IMAGE_PATH"); p != "" {
-		if _, err := os.Stat(p); err != nil {
-			os.Unsetenv("KERNEL_IMAGE_PATH")
+
+	// Resolve kernel path: explicit env var > data dir > project dir
+	kernelPath := os.Getenv("KERNEL_IMAGE_PATH")
+	if kernelPath != "" {
+		if _, err := os.Stat(kernelPath); err != nil {
+			kernelPath = ""
 		}
 	}
-	if os.Getenv("KERNEL_IMAGE_PATH") == "" {
+	if kernelPath == "" {
 		if k := findKernelInDir(filepath.Join(dataDir, "kernel")); k != "" {
-			os.Setenv("KERNEL_IMAGE_PATH", k)
+			kernelPath = k
 			logger.Info("using kernel from data dir", zap.String("path", k))
 		}
 	}
-	if os.Getenv("KERNEL_IMAGE_PATH") == "" {
+	if kernelPath == "" {
 		if cwd, _ := os.Getwd(); cwd != "" {
 			if k := findKernelInDir(filepath.Join(cwd, "kernel")); k != "" {
-				os.Setenv("KERNEL_IMAGE_PATH", k)
+				kernelPath = k
 				logger.Info("using kernel from project kernel/", zap.String("path", k))
 			}
 		}
 	}
-	if os.Getenv("HOST_INTERFACE") == "" {
+
+	// Resolve host interface
+	hostInterface := os.Getenv("HOST_INTERFACE")
+	if hostInterface == "" {
 		if iface := detectDefaultRouteInterface(); iface != "" {
-			os.Setenv("HOST_INTERFACE", iface)
+			hostInterface = iface
 			logger.Info("auto-detected host interface for NAT", zap.String("interface", iface))
 		}
 	}
-	if fc := resolveFirecrackerBin(dataDir); fc != "" {
-		os.Setenv("FIRECRACKER_BINARY_PATH", fc)
-		logger.Info("using Firecracker binary", zap.String("path", fc))
+
+	// Resolve Firecracker binary path. Keep env var for child processes (Firecracker itself).
+	fcBin := resolveFirecrackerBin(dataDir)
+	if fcBin != "" {
+		os.Setenv("FIRECRACKER_BINARY_PATH", fcBin)
+		logger.Info("using Firecracker binary", zap.String("path", fcBin))
 	}
+
 	configFilePath := filepath.Join(dataDir, "config.yml")
 	cfg, err := config.LoadWithFile(configFilePath)
 	if err != nil {
-		logger.Fatal("load agent config", zap.Error(err))
+		return fmt.Errorf("load agent config: %w", err)
 	}
 	if _, statErr := os.Stat(configFilePath); statErr == nil {
 		logger.Info("loaded config file", zap.String("path", configFilePath))
 	}
+
+	// Override config fields directly with resolved paths (instead of going through env vars).
+	cfg.VMBaseDir = vmBaseDir
+	cfg.ImageCacheDir = imageCacheDir
+	cfg.SSHKeyPath = sshKeyPath
+	if kernelPath != "" {
+		cfg.KernelImagePath = kernelPath
+	}
+	if hostInterface != "" {
+		cfg.HostInterface = hostInterface
+	}
+	if fcBin != "" {
+		cfg.FirecrackerBin = fcBin
+	}
+
+	if err := config.Validate(cfg); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
+	}
 	database, err := db.New(dataDir)
 	if err != nil {
-		logger.Fatal("open db", zap.Error(err))
+		return fmt.Errorf("open db: %w", err)
 	}
 	defer database.Close()
 
@@ -577,34 +617,41 @@ func runDaemon(logger *zap.Logger, dataDir string) {
 		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
+	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("daemon listening", zap.Int("port", cfg.Port), zap.String("data_dir", dataDir))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatal("server error", zap.Error(err))
+			errCh <- fmt.Errorf("server error: %w", err)
 		}
 	}()
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	logger.Info("shutting down")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	select {
+	case <-quit:
+	case err := <-errCh:
+		return err
+	}
+	logger.Info("shutting down gracefully (waiting up to 10s for connections to drain)")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		logger.Error("shutdown error", zap.Error(err))
 	}
+	logger.Info("daemon stopped")
+	return nil
 }
 
-func runList(logger *zap.Logger, database *sql.DB) {
+func runList(logger *zap.Logger, database *sql.DB) error {
 	rows, err := database.Query("SELECT id, name, status, image, ip_address FROM vm WHERE status != 'destroyed'")
 	if err != nil {
-		logger.Fatal("query vms", zap.Error(err))
+		return fmt.Errorf("query vms: %w", err)
 	}
 	defer rows.Close()
 	var rowsData []struct{ id, name, status, image, ip string }
 	for rows.Next() {
 		var id, name, status, image, ip sql.NullString
 		if err := rows.Scan(&id, &name, &status, &image, &ip); err != nil {
-			logger.Fatal("scan", zap.Error(err))
+			return fmt.Errorf("scan: %w", err)
 		}
 		img := image.String
 		if img != "" && len(img) > 40 {
@@ -616,7 +663,7 @@ func runList(logger *zap.Logger, database *sql.DB) {
 	}
 	if len(rowsData) == 0 {
 		fmt.Println("No VMs. Deploy one with: sistemo vm deploy <image>")
-		return
+		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tIMAGE\tIP")
@@ -624,6 +671,7 @@ func runList(logger *zap.Logger, database *sql.DB) {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.id, r.name, r.status, r.image, r.ip)
 	}
 	tw.Flush()
+	return nil
 }
 
 // Default image registry. Override with SISTEMO_REGISTRY_URL.
@@ -682,10 +730,10 @@ func archSuffix() string {
 
 // resolveImage resolves an image argument to an absolute path or URL.
 // Order: URL → local file → local cache → registry download → error.
-func resolveImage(logger *zap.Logger, dataDir, image string) string {
+func resolveImage(logger *zap.Logger, dataDir, image string) (string, error) {
 	// 1. HTTP/HTTPS URL — pass through to daemon
 	if strings.HasPrefix(image, "http://") || strings.HasPrefix(image, "https://") {
-		return image
+		return image, nil
 	}
 
 	// 2. Explicit local file (contains / or ends in .ext4)
@@ -693,16 +741,16 @@ func resolveImage(logger *zap.Logger, dataDir, image string) string {
 		abs, err := filepath.Abs(image)
 		if err == nil {
 			if _, err := os.Stat(abs); err == nil {
-				return abs
+				return abs, nil
 			}
 		}
-		logger.Fatal("image file not found", zap.String("path", image))
+		return "", fmt.Errorf("image file not found: %s", image)
 	}
 
 	// 3. Cached in ~/.sistemo/images/
 	localPath := findLocalImage(dataDir, image)
 	if localPath != "" {
-		return localPath
+		return localPath, nil
 	}
 
 	// 4. Download from registry
@@ -735,13 +783,13 @@ func resolveImage(logger *zap.Logger, dataDir, image string) string {
 		fmt.Fprintln(os.Stderr, "  List available:      sistemo image list")
 		fmt.Fprintln(os.Stderr, "  Use a local file:    sistemo vm deploy ./path/to/rootfs.ext4")
 		fmt.Fprintln(os.Stderr, "")
-		os.Exit(1)
+		return "", fmt.Errorf("image %q not found", image)
 	}
 	fmt.Printf("Saved to %s\n", dest)
-	return dest
+	return dest, nil
 }
 
-func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memoryMB, storageMB int, attachPaths []string, nameOverride string, exposePorts []string) {
+func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memoryMB, storageMB int, attachPaths []string, nameOverride string, exposePorts []string, networkName string) error {
 	if !filepath.IsAbs(image) && !strings.HasPrefix(image, "http://") && !strings.HasPrefix(image, "https://") {
 		if abs, err := filepath.Abs(image); err == nil {
 			if _, err := os.Stat(abs); err == nil {
@@ -760,12 +808,22 @@ func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memory
 	}
 	baseURL := daemon.URL()
 	if err := daemon.Health(baseURL); err != nil {
-		logger.Fatal("daemon not reachable (run 'sistemo up' first)", zap.String("url", baseURL), zap.Error(err))
+		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
 	}
 	name := nameOverride
 	if name == "" {
 		name = imageName(image)
 	}
+	// Resolve network name to ID, bridge, subnet if specified
+	var networkID, networkBridge, networkSubnet string
+	if networkName != "" {
+		err := database.QueryRow("SELECT id, bridge_name, subnet FROM network WHERE name = ?", networkName).Scan(&networkID, &networkBridge, &networkSubnet)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Network %q not found. Create it with: sistemo network create %s\n", networkName, networkName)
+			return fmt.Errorf("network %q not found", networkName)
+		}
+	}
+
 	logger.Info("sending create VM request", zap.Int("vcpus", vcpus), zap.Int("memory_mb", memoryMB), zap.Int("storage_mb", storageMB))
 	req := &daemon.CreateVMRequest{
 		Name:            name,
@@ -775,6 +833,8 @@ func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memory
 		StorageMB:       storageMB,
 		AttachedStorage: attachPaths,
 		InjectInitSSH:   true,
+		NetworkBridge:   networkBridge,
+		NetworkSubnet:   networkSubnet,
 	}
 	resp, err := daemon.CreateVM(baseURL, req)
 	if err != nil {
@@ -782,7 +842,7 @@ func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memory
 		if strings.Contains(errStr, "already exists") {
 			fmt.Fprintf(os.Stderr, "A VM named %q already exists. Use a different name (--name) or destroy the existing one first:\n", name)
 			fmt.Fprintf(os.Stderr, "  sistemo vm destroy %s\n", name)
-			os.Exit(1)
+			return fmt.Errorf("VM named %q already exists", name)
 		}
 		if (strings.Contains(errStr, "Permission denied") || strings.Contains(errStr, "Operation not permitted")) &&
 			(strings.Contains(errStr, "netns") || strings.Contains(errStr, "mount")) {
@@ -793,10 +853,18 @@ func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memory
 			fmt.Fprintln(os.Stderr, "  3. In this terminal run again: sistemo vm deploy <image>")
 			fmt.Fprintln(os.Stderr, "")
 		}
-		logger.Fatal("create VM", zap.Error(err))
+		return fmt.Errorf("create VM: %w", err)
 	}
+	// Store network association
+	if networkID != "" && database != nil {
+		database.Exec("UPDATE vm SET network_id = ? WHERE id = ?", networkID, resp.VMID)
+	}
+
 	fmt.Printf("Deployed %q as %s (%s)\n", image, name, resp.VMID)
 	fmt.Printf("  IP: %s  Namespace: %s  Boot: %dms\n", resp.IPAddress, resp.Namespace, resp.BootTimeMS)
+	if networkName != "" {
+		fmt.Printf("  Network: %s\n", networkName)
+	}
 	fmt.Printf("  Terminal: %s/terminals/vm/%s\n", baseURL, resp.VMID)
 
 	// Expose ports if requested
@@ -812,6 +880,7 @@ func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memory
 		}
 		fmt.Printf("  Exposed host:%d → VM:%d (tcp)\n", hostPort, vmPort)
 	}
+	return nil
 }
 
 func parseSizeMB(s string) (int, error) {
@@ -988,10 +1057,10 @@ func runImageList(dataDir string) {
 	fmt.Println("Build:   sudo sistemo image build <docker-image>")
 }
 
-func runImagePull(logger *zap.Logger, dataDir, name string) {
+func runImagePull(logger *zap.Logger, dataDir, name string) error {
 	imagesDir := filepath.Join(dataDir, "images")
 	if err := os.MkdirAll(imagesDir, 0755); err != nil {
-		logger.Fatal("create images dir", zap.Error(err))
+		return fmt.Errorf("create images dir: %w", err)
 	}
 
 	dest := filepath.Join(imagesDir, name+".rootfs.ext4")
@@ -1004,7 +1073,7 @@ func runImagePull(logger *zap.Logger, dataDir, name string) {
 	}
 	if err != nil {
 		fmt.Printf("failed: %v\n", err)
-		return
+		return fmt.Errorf("pull image %s: %w", name, err)
 	}
 
 	info, _ := os.Stat(dest)
@@ -1014,6 +1083,7 @@ func runImagePull(logger *zap.Logger, dataDir, name string) {
 	}
 	fmt.Printf("done (%d MB)\n", sizeMB)
 	fmt.Printf("Deploy with: sistemo vm deploy %s\n", name)
+	return nil
 }
 
 
@@ -1063,18 +1133,38 @@ func downloadImageToFile(url, dest string) error {
 	return nil
 }
 
-func runDestroy(logger *zap.Logger, database *sql.DB, nameOrID string) {
-	baseURL := daemon.URL()
+// lookupVM resolves a VM name or ID to its UUID. Returns the VM ID or an error.
+// excludeStatuses lists statuses to exclude from the lookup (e.g. "destroyed", "error").
+func lookupVM(database *sql.DB, nameOrID string, excludeStatuses ...string) (string, error) {
+	if len(excludeStatuses) == 0 {
+		excludeStatuses = []string{"destroyed"}
+	}
+	placeholders := make([]string, len(excludeStatuses))
+	args := []interface{}{nameOrID, nameOrID}
+	for i, s := range excludeStatuses {
+		placeholders[i] = "?"
+		args = append(args, s)
+	}
+	query := fmt.Sprintf(
+		"SELECT id FROM vm WHERE (id = ? OR name = ?) AND status NOT IN (%s) LIMIT 1",
+		strings.Join(placeholders, ", "),
+	)
 	var vmID string
-	err := database.QueryRow(
-		"SELECT id FROM vm WHERE (id = ? OR name = ?) AND status != 'destroyed' LIMIT 1",
-		nameOrID, nameOrID,
-	).Scan(&vmID)
+	err := database.QueryRow(query, args...).Scan(&vmID)
 	if err == sql.ErrNoRows {
-		logger.Fatal("VM not found", zap.String("name_or_id", nameOrID))
+		return "", fmt.Errorf("VM not found: %s", nameOrID)
 	}
 	if err != nil {
-		logger.Fatal("lookup vm", zap.Error(err))
+		return "", fmt.Errorf("lookup vm: %w", err)
+	}
+	return vmID, nil
+}
+
+func runDestroy(logger *zap.Logger, database *sql.DB, nameOrID string) error {
+	baseURL := daemon.URL()
+	vmID, err := lookupVM(database, nameOrID, "destroyed")
+	if err != nil {
+		return err
 	}
 	ok, err := daemon.DeleteVM(baseURL, vmID)
 	if err != nil {
@@ -1089,83 +1179,96 @@ func runDestroy(logger *zap.Logger, database *sql.DB, nameOrID string) {
 			now := time.Now().UTC().Format(time.RFC3339)
 			database.Exec("UPDATE vm SET status = 'destroyed', last_state_change = ? WHERE id = ?", now, vmID)
 		} else {
-			logger.Fatal("destroy VM", zap.Error(err))
+			return fmt.Errorf("destroy VM: %w", err)
 		}
 	}
 	if !ok {
-		fmt.Printf("VM %s not found on daemon (may already be gone).\n", vmID)
+		fmt.Printf("VM %s not found on daemon (may already be gone). Marked as destroyed.\n", vmID)
+		return nil
 	}
 	fmt.Printf("Destroyed %s\n", vmID)
+	return nil
 }
 
-func runStop(logger *zap.Logger, database *sql.DB, nameOrID string) {
+func runStop(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	baseURL := daemon.URL()
 	if err := daemon.Health(baseURL); err != nil {
-		logger.Fatal("daemon not reachable (run 'sistemo up' first)", zap.String("url", baseURL), zap.Error(err))
+		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
 	}
-	var vmID string
-	err := database.QueryRow(
-		"SELECT id FROM vm WHERE (id = ? OR name = ?) AND status NOT IN ('destroyed', 'stopped') LIMIT 1",
-		nameOrID, nameOrID,
-	).Scan(&vmID)
-	if err == sql.ErrNoRows {
-		logger.Fatal("VM not found or already stopped (list VMs: sistemo vm list)", zap.String("name_or_id", nameOrID))
-	}
+	vmID, err := lookupVM(database, nameOrID, "destroyed", "stopped")
 	if err != nil {
-		logger.Fatal("lookup vm", zap.Error(err))
+		return fmt.Errorf("VM not found or already stopped (list VMs: sistemo vm list): %s", nameOrID)
 	}
 	stopped, err := daemon.StopVM(baseURL, vmID)
 	if err != nil {
-		logger.Fatal("stop VM", zap.Error(err))
+		return fmt.Errorf("stop VM: %w", err)
 	}
 	if !stopped {
 		fmt.Printf("VM %s not found on daemon.\n", vmID)
-		return
+		return nil
 	}
 	fmt.Printf("Stopped %s\n", vmID)
+	return nil
 }
 
-func runStart(logger *zap.Logger, database *sql.DB, nameOrID string) {
+func runStart(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	baseURL := daemon.URL()
 	if err := daemon.Health(baseURL); err != nil {
-		logger.Fatal("daemon not reachable (run 'sistemo up' first)", zap.String("url", baseURL), zap.Error(err))
+		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
 	}
-	var vmID string
-	err := database.QueryRow(
-		"SELECT id FROM vm WHERE (id = ? OR name = ?) AND status != 'destroyed' LIMIT 1",
-		nameOrID, nameOrID,
-	).Scan(&vmID)
-	if err == sql.ErrNoRows {
-		logger.Fatal("VM not found", zap.String("name_or_id", nameOrID))
-	}
+	vmID, err := lookupVM(database, nameOrID, "destroyed")
 	if err != nil {
-		logger.Fatal("lookup vm", zap.Error(err))
+		return err
 	}
 	resp, err := daemon.StartVM(baseURL, vmID)
 	if err != nil {
-		logger.Fatal("start VM", zap.Error(err))
+		return fmt.Errorf("start VM: %w", err)
 	}
 	fmt.Printf("Started %s\n", vmID)
 	fmt.Printf("  IP: %s  Namespace: %s  Boot: %dms\n", resp.IPAddress, resp.Namespace, resp.BootTimeMS)
 	fmt.Printf("  Terminal: %s/terminals/vm/%s\n", baseURL, vmID)
+	return nil
 }
 
-func runTerminal(logger *zap.Logger, database *sql.DB, nameOrID string) {
-	var vmID string
-	err := database.QueryRow(
-		"SELECT id FROM vm WHERE (id = ? OR name = ?) AND status NOT IN ('destroyed', 'error', 'failed') LIMIT 1",
-		nameOrID, nameOrID,
-	).Scan(&vmID)
-	if err == sql.ErrNoRows {
-		logger.Fatal("VM not found or not running", zap.String("name_or_id", nameOrID))
+func runRestart(logger *zap.Logger, database *sql.DB, nameOrID string) error {
+	baseURL := daemon.URL()
+	if err := daemon.Health(baseURL); err != nil {
+		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
 	}
+	vmID, err := lookupVM(database, nameOrID, "destroyed")
 	if err != nil {
-		logger.Fatal("lookup vm", zap.Error(err))
+		return err
+	}
+
+	// Stop (ignore "not found" — VM might already be stopped)
+	stopped, err := daemon.StopVM(baseURL, vmID)
+	if err != nil {
+		return fmt.Errorf("stop VM: %w", err)
+	}
+	if stopped {
+		fmt.Printf("Stopped %s\n", vmID)
+	}
+
+	// Start
+	resp, err := daemon.StartVM(baseURL, vmID)
+	if err != nil {
+		return fmt.Errorf("start VM: %w", err)
+	}
+	fmt.Printf("Started %s\n", vmID)
+	fmt.Printf("  IP: %s  Namespace: %s  Boot: %dms\n", resp.IPAddress, resp.Namespace, resp.BootTimeMS)
+	return nil
+}
+
+func runTerminal(logger *zap.Logger, database *sql.DB, nameOrID string) error {
+	vmID, err := lookupVM(database, nameOrID, "destroyed", "error", "failed")
+	if err != nil {
+		return fmt.Errorf("VM not found or not running: %s", nameOrID)
 	}
 	baseURL := daemon.URL()
 	url := fmt.Sprintf("%s/terminals/vm/%s", baseURL, vmID)
 	fmt.Printf("Open in your browser: %s\n", url)
 	openBrowser(url)
+	return nil
 }
 
 func openBrowser(url string) {
@@ -1185,26 +1288,34 @@ func openBrowser(url string) {
 	_ = cmd.Start()
 }
 
-func runStatus(logger *zap.Logger, database *sql.DB, nameOrID string) {
-	row := database.QueryRow(
-		"SELECT id, name, status, image, ip_address, namespace, created_at FROM vm WHERE (id = ? OR name = ?) AND status != 'destroyed' ORDER BY created_at DESC LIMIT 1",
-		nameOrID, nameOrID,
-	)
-	var id, name, status, image, ip, ns, created sql.NullString
-	err := row.Scan(&id, &name, &status, &image, &ip, &ns, &created)
-	if err == sql.ErrNoRows {
-		logger.Fatal("VM not found", zap.String("name_or_id", nameOrID))
-	}
+func runStatus(logger *zap.Logger, database *sql.DB, nameOrID string) error {
+	vmID, err := lookupVM(database, nameOrID, "destroyed")
 	if err != nil {
-		logger.Fatal("lookup vm", zap.Error(err))
+		return err
 	}
-	fmt.Printf("ID:       %s\n", id.String)
-	fmt.Printf("Name:     %s\n", name.String)
-	fmt.Printf("Status:   %s\n", status.String)
-	fmt.Printf("Image:    %s\n", image.String)
-	fmt.Printf("IP:       %s\n", ip.String)
+	row := database.QueryRow(
+		"SELECT id, name, status, image, ip_address, namespace, created_at, network_id FROM vm WHERE id = ?",
+		vmID,
+	)
+	var id, name, status, image, ip, ns, created, networkID sql.NullString
+	if err := row.Scan(&id, &name, &status, &image, &ip, &ns, &created, &networkID); err != nil {
+		return fmt.Errorf("lookup vm details: %w", err)
+	}
+	fmt.Printf("ID:        %s\n", id.String)
+	fmt.Printf("Name:      %s\n", name.String)
+	fmt.Printf("Status:    %s\n", status.String)
+	fmt.Printf("Image:     %s\n", image.String)
+	fmt.Printf("IP:        %s\n", ip.String)
 	fmt.Printf("Namespace: %s\n", ns.String)
-	fmt.Printf("Created:  %s\n", created.String)
+	fmt.Printf("Created:   %s\n", created.String)
+	if networkID.Valid && networkID.String != "" {
+		var netName string
+		if database.QueryRow("SELECT name FROM network WHERE id = ?", networkID.String).Scan(&netName) == nil {
+			fmt.Printf("Network:   %s\n", netName)
+		}
+	} else {
+		fmt.Printf("Network:   default\n")
+	}
 
 	// Show exposed ports
 	portRows, err := database.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", id.String)
@@ -1223,50 +1334,41 @@ func runStatus(logger *zap.Logger, database *sql.DB, nameOrID string) {
 			}
 		}
 	}
+	return nil
 }
 
-func runLogs(logger *zap.Logger, database *sql.DB, nameOrID string) {
-	var vmID string
-	err := database.QueryRow(
-		"SELECT id FROM vm WHERE (id = ? OR name = ?) AND status != 'destroyed' LIMIT 1",
-		nameOrID, nameOrID,
-	).Scan(&vmID)
-	if err == sql.ErrNoRows {
-		logger.Fatal("VM not found", zap.String("name_or_id", nameOrID))
-	}
+func runLogs(logger *zap.Logger, database *sql.DB, nameOrID string) error {
+	vmID, err := lookupVM(database, nameOrID, "destroyed")
 	if err != nil {
-		logger.Fatal("lookup vm", zap.Error(err))
+		return err
 	}
 	baseURL := daemon.URL()
-	resp, err := http.Get(baseURL + "/vms/" + vmID + "/logs")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(baseURL + "/vms/" + vmID + "/logs")
 	if err != nil {
-		logger.Fatal("fetch logs", zap.Error(err))
+		return fmt.Errorf("fetch logs: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		logger.Fatal("logs request failed", zap.Int("status", resp.StatusCode))
+		return fmt.Errorf("logs request failed: HTTP %d", resp.StatusCode)
 	}
 	io.Copy(os.Stdout, resp.Body)
+	return nil
 }
 
-func runSSH(logger *zap.Logger, database *sql.DB, nameOrID string) {
-	var vmID string
-	var ip sql.NullString
-	err := database.QueryRow(
-		"SELECT id, ip_address FROM vm WHERE (id = ? OR name = ?) AND status NOT IN ('destroyed', 'error', 'failed') LIMIT 1",
-		nameOrID, nameOrID,
-	).Scan(&vmID, &ip)
-	if err == sql.ErrNoRows {
-		logger.Fatal("VM not found or not running", zap.String("name_or_id", nameOrID))
-	}
+func runSSH(logger *zap.Logger, database *sql.DB, dataDir, nameOrID string) error {
+	vmID, err := lookupVM(database, nameOrID, "destroyed", "error", "failed")
 	if err != nil {
-		logger.Fatal("lookup vm", zap.Error(err))
+		return fmt.Errorf("VM not found or not running: %s", nameOrID)
+	}
+	var ip sql.NullString
+	if err := database.QueryRow("SELECT ip_address FROM vm WHERE id = ?", vmID).Scan(&ip); err != nil {
+		return fmt.Errorf("lookup vm IP: %w", err)
 	}
 	if !ip.Valid || ip.String == "" {
-		logger.Fatal("VM has no IP address", zap.String("vm_id", vmID))
+		return fmt.Errorf("VM has no IP address: %s", vmID)
 	}
 
-	dataDir := getDataDir("")
 	sshKeyPath := filepath.Join(dataDir, "ssh", "sistemo_key")
 
 	sshArgs := []string{
@@ -1285,28 +1387,22 @@ func runSSH(logger *zap.Logger, database *sql.DB, nameOrID string) {
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
+			return &ExitError{Code: exitErr.ExitCode()}
 		}
-		logger.Fatal("ssh", zap.Error(err))
+		return fmt.Errorf("ssh: %w", err)
 	}
+	return nil
 }
 
-func runExec(logger *zap.Logger, database *sql.DB, nameOrID, command string) {
-	var vmID string
-	err := database.QueryRow(
-		"SELECT id FROM vm WHERE (id = ? OR name = ?) AND status NOT IN ('destroyed', 'error', 'failed') LIMIT 1",
-		nameOrID, nameOrID,
-	).Scan(&vmID)
-	if err == sql.ErrNoRows {
-		logger.Fatal("VM not found or not running", zap.String("name_or_id", nameOrID))
-	}
+func runExec(logger *zap.Logger, database *sql.DB, nameOrID, command string) error {
+	vmID, err := lookupVM(database, nameOrID, "destroyed", "error", "failed")
 	if err != nil {
-		logger.Fatal("lookup vm", zap.Error(err))
+		return fmt.Errorf("VM not found or not running: %s", nameOrID)
 	}
 	baseURL := daemon.URL()
 	result, err := daemon.Exec(baseURL, vmID, command, 120)
 	if err != nil {
-		logger.Fatal("exec", zap.Error(err))
+		return fmt.Errorf("exec: %w", err)
 	}
 	if result.Stdout != "" {
 		fmt.Print(result.Stdout)
@@ -1315,8 +1411,9 @@ func runExec(logger *zap.Logger, database *sql.DB, nameOrID, command string) {
 		fmt.Fprint(os.Stderr, result.Stderr)
 	}
 	if result.ExitCode != 0 {
-		os.Exit(result.ExitCode)
+		return &ExitError{Code: result.ExitCode}
 	}
+	return nil
 }
 
 type volumeEntry struct {
@@ -1373,10 +1470,10 @@ func resolveVolumePath(dataDir, idOrName string) string {
 	return ""
 }
 
-func runStorageCreate(logger *zap.Logger, dataDir string, sizeMB int, name string) {
+func runStorageCreate(logger *zap.Logger, dataDir string, sizeMB int, name string) error {
 	list, err := readVolumeIndex(dataDir)
 	if err != nil {
-		logger.Fatal("read volume index", zap.Error(err))
+		return fmt.Errorf("read volume index: %w", err)
 	}
 	if list == nil {
 		list = []volumeEntry{}
@@ -1384,23 +1481,23 @@ func runStorageCreate(logger *zap.Logger, dataDir string, sizeMB int, name strin
 	id := uuid.New().String()
 	dir := volumesDir(dataDir)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		logger.Fatal("create volumes dir", zap.Error(err))
+		return fmt.Errorf("create volumes dir: %w", err)
 	}
 	path := filepath.Join(dir, id+".ext4")
 	f, err := os.Create(path)
 	if err != nil {
-		logger.Fatal("create volume file", zap.Error(err))
+		return fmt.Errorf("create volume file: %w", err)
 	}
 	if err := f.Truncate(int64(sizeMB) * 1024 * 1024); err != nil {
 		f.Close()
 		os.Remove(path)
-		logger.Fatal("truncate volume", zap.Error(err))
+		return fmt.Errorf("truncate volume: %w", err)
 	}
 	f.Close()
 	cmd := exec.Command("mkfs.ext4", "-q", "-F", path)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		os.Remove(path)
-		logger.Fatal("mkfs.ext4", zap.Error(err), zap.String("output", string(out)))
+		return fmt.Errorf("mkfs.ext4: %w (%s)", err, string(out))
 	}
 	if name == "" {
 		name = id[:8]
@@ -1408,20 +1505,21 @@ func runStorageCreate(logger *zap.Logger, dataDir string, sizeMB int, name strin
 	list = append(list, volumeEntry{ID: id, Name: name, Path: path, SizeMB: sizeMB})
 	if err := writeVolumeIndex(dataDir, list); err != nil {
 		os.Remove(path)
-		logger.Fatal("write volume index", zap.Error(err))
+		return fmt.Errorf("write volume index: %w", err)
 	}
 	fmt.Printf("Created volume %s (%s) %d MB at %s\n", id, name, sizeMB, path)
 	fmt.Println("To attach: deploy a VM with --attach=ID (e.g. sistemo vm deploy --attach=" + id + " <image>)")
+	return nil
 }
 
-func runStorageList(logger *zap.Logger, dataDir string) {
+func runStorageList(logger *zap.Logger, dataDir string) error {
 	list, err := readVolumeIndex(dataDir)
 	if err != nil {
-		logger.Fatal("read volume index", zap.Error(err))
+		return fmt.Errorf("read volume index: %w", err)
 	}
 	if len(list) == 0 {
 		fmt.Println("No volumes. Create one with: sistemo volume create <size_mb> [--name=myvol]")
-		return
+		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "VOLUME ID\tNAME\tSIZE (MB)\tPATH")
@@ -1433,12 +1531,13 @@ func runStorageList(logger *zap.Logger, dataDir string) {
 		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", v.ID, v.Name, v.SizeMB, path)
 	}
 	tw.Flush()
+	return nil
 }
 
-func runStorageDelete(logger *zap.Logger, dataDir, idOrName string) {
+func runStorageDelete(logger *zap.Logger, dataDir, idOrName string) error {
 	list, err := readVolumeIndex(dataDir)
 	if err != nil {
-		logger.Fatal("read volume index", zap.Error(err))
+		return fmt.Errorf("read volume index: %w", err)
 	}
 	var newList []volumeEntry
 	var path string
@@ -1450,11 +1549,12 @@ func runStorageDelete(logger *zap.Logger, dataDir, idOrName string) {
 		newList = append(newList, v)
 	}
 	if path == "" {
-		logger.Fatal("volume not found", zap.String("id_or_name", idOrName))
+		return fmt.Errorf("volume not found: %s", idOrName)
 	}
 	if err := writeVolumeIndex(dataDir, newList); err != nil {
-		logger.Fatal("write volume index", zap.Error(err))
+		return fmt.Errorf("write volume index: %w", err)
 	}
 	os.Remove(path)
 	fmt.Printf("Deleted volume %s\n", idOrName)
+	return nil
 }

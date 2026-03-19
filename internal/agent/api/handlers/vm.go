@@ -19,6 +19,7 @@ import (
 	"github.com/davidestf/sistemo/internal/agent/config"
 	"github.com/davidestf/sistemo/internal/agent/network"
 	"github.com/davidestf/sistemo/internal/agent/vm"
+	"github.com/davidestf/sistemo/internal/db"
 	"go.uber.org/zap"
 )
 
@@ -43,6 +44,8 @@ type createVMRequest struct {
 	Metadata        map[string]string `json:"metadata,omitempty"`
 	AttachedStorage []string          `json:"attached_storage,omitempty"`
 	InjectInitSSH   bool              `json:"inject_init_ssh,omitempty"`
+	NetworkBridge   string            `json:"network_bridge,omitempty"`
+	NetworkSubnet   string            `json:"network_subnet,omitempty"`
 }
 
 func ifZero(v, d int) int {
@@ -144,6 +147,8 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 		AttachedStorage: req.AttachedStorage,
 		Metadata:        req.Metadata,
 		InjectInitSSH:   req.InjectInitSSH,
+		NetworkBridge:   req.NetworkBridge,
+		NetworkSubnet:   req.NetworkSubnet,
 	}
 
 	result, err := h.mgr.Create(r.Context(), createReq)
@@ -153,6 +158,7 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 			h.db.Exec("UPDATE vm SET status = 'error', maintenance_operation = NULL, last_state_change = ? WHERE id = ?",
 				time.Now().UTC().Format(time.RFC3339), vmid)
 		}
+		db.LogAction(h.db, "create", "vm", vmid, name, err.Error(), false)
 		h.logger.Error("create VM failed", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -165,6 +171,7 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 			result.IPAddress, result.Namespace, time.Now().UTC().Format(time.RFC3339), vmid)
 	}
 
+	db.LogAction(h.db, "create", "vm", vmid, name, fmt.Sprintf("image=%s vcpus=%d memory=%dMB", req.Image, effectiveVCPUs, effectiveMemoryMB), true)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -197,6 +204,7 @@ func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
 			time.Now().UTC().Format(time.RFC3339), vmID)
 		h.db.Exec("DELETE FROM port_rule WHERE vm_id = ?", vmID)
 	}
+	db.LogAction(h.db, "destroy", "vm", vmID, "", "", terminated)
 	if !terminated {
 		writeJSON(w, http.StatusNotFound, vm.DeleteResponse{VMID: vmID, Terminated: false})
 		return
@@ -222,6 +230,7 @@ func (h *VM) Stop(w http.ResponseWriter, r *http.Request) {
 		// Port rule DB rows are kept so restorePortRules can re-apply them on start.
 		// The iptables rules were already removed by stopVM.
 	}
+	db.LogAction(h.db, "stop", "vm", vmID, "", "", stopped)
 	if !stopped {
 		writeJSON(w, http.StatusNotFound, map[string]interface{}{"vm_id": vmID, "stopped": false})
 		return
@@ -244,6 +253,7 @@ func (h *VM) Start(w http.ResponseWriter, r *http.Request) {
 		h.db.Exec("UPDATE vm SET status = 'running', ip_address = ?, namespace = ?, last_state_change = ? WHERE id = ?",
 			result.IPAddress, result.Namespace, time.Now().UTC().Format(time.RFC3339), vmID)
 	}
+	db.LogAction(h.db, "start", "vm", vmID, "", "", true)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -267,6 +277,7 @@ func (h *VM) Exec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var body struct {
 		Script     string `json:"script"`
 		TimeoutSec int    `json:"timeout_sec"`
@@ -324,6 +335,7 @@ func (h *VM) Expose(w http.ResponseWriter, r *http.Request) {
 	if vmID == "" {
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req struct {
 		HostPort int    `json:"host_port"`
 		VMPort   int    `json:"vm_port"`
@@ -378,6 +390,7 @@ func (h *VM) Expose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	db.LogAction(h.db, "expose", "vm", vmID, "", fmt.Sprintf("host:%d->vm:%d/%s", req.HostPort, req.VMPort, req.Protocol), true)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"vm_id":     vmID,
 		"host_port": req.HostPort,
@@ -429,6 +442,7 @@ func (h *VM) Unexpose(w http.ResponseWriter, r *http.Request) {
 		h.db.Exec(`DELETE FROM port_rule WHERE vm_id = ? AND host_port = ?`, vmID, hostPort)
 	}
 
+	db.LogAction(h.db, "unexpose", "vm", vmID, "", fmt.Sprintf("host:%d", hostPort), true)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"vm_id":     vmID,
 		"host_port": hostPort,

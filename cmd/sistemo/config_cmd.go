@@ -25,6 +25,7 @@ func configShowCmd() *cobra.Command {
 			out := map[string]interface{}{
 				"port":                   cfg.Port,
 				"host_interface":         cfg.HostInterface,
+				"bridge_subnet":          cfg.BridgeSubnet,
 				"max_vcpus":              cfg.MaxVCPUs,
 				"max_memory_mb":          cfg.MaxMemoryMB,
 				"max_storage_mb":         cfg.MaxStorageMB,

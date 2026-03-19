@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,7 +28,11 @@ func newLogger() *zap.Logger {
 	cfg := zap.NewProductionConfig()
 	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	cfg.DisableStacktrace = true
-	logger, _ := cfg.Build()
+	logger, err := cfg.Build()
+	if err != nil {
+		// Fallback to nop logger — should never happen with production config
+		return zap.NewNop()
+	}
 	return logger
 }
 
@@ -110,7 +115,7 @@ var versionStr = "dev"
 func Execute() {
 	root := rootCmd()
 	root.SilenceUsage = true
-	root.CompletionOptions.DisableDefaultCmd = true
+	root.CompletionOptions.DisableDefaultCmd = true // we provide our own completion command
 	root.Version = versionStr
 
 	// Backward compatibility: sistemo --up runs the daemon
@@ -124,7 +129,9 @@ func Execute() {
 			os.Exit(0)
 		}
 		if up {
-			runDaemon(getLogger(cmd), getDataDirFromCmd(cmd))
+			if err := runDaemon(getLogger(cmd), getDataDirFromCmd(cmd)); err != nil {
+				return err
+			}
 			os.Exit(0)
 		}
 		return nil
@@ -136,10 +143,18 @@ func Execute() {
 	root.AddCommand(imageCmd())
 	root.AddCommand(volumeCmd())
 	root.AddCommand(vmCmd())
+	root.AddCommand(networkCmd())
 	root.AddCommand(serviceCmd())
 	root.AddCommand(configShowCmd())
+	root.AddCommand(doctorCmd())
+	root.AddCommand(historyCmd())
+	root.AddCommand(completionCmd())
 
 	if err := root.Execute(); err != nil {
+		var exitErr *ExitError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.Code)
+		}
 		os.Exit(1)
 	}
 }

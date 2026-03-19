@@ -31,11 +31,12 @@ func NewRouter(cfg *config.Config, mgr *vm.Manager, logger *zap.Logger, db *sql.
 		logger.Warn("HOST_API_KEY unset — API is unauthenticated (suitable for localhost only)")
 	}
 
-	// Handler groups (minimal: VM, terminal, health only; no snapshot/storage/backup)
+	// Handler groups
 	vmHandler := handlers.NewVM(mgr, cfg, logger, db)
 	terminalHandler := handlers.NewTerminal(mgr, cfg, logger, db)
 	healthHandler := handlers.NewHealth(mgr, cfg, logger)
 	dashboardHandler := handlers.NewDashboard(db, logger)
+	networkHandler := handlers.NewNetwork(logger, db)
 
 	// Routes (GET and HEAD so curl -I works)
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -61,6 +62,10 @@ func NewRouter(cfg *config.Config, mgr *vm.Manager, logger *zap.Logger, db *sql.
 
 	r.Get("/terminals/vm/{vmID}", terminalHandler.TerminalPageOrWebSocket)
 	r.Post("/vms/{vmID}/terminal-session", terminalHandler.CreateSession)
+
+	r.Post("/networks", networkHandler.Create)
+	r.Get("/networks", networkHandler.List)
+	r.Delete("/networks/{name}", networkHandler.Delete)
 
 	r.Get("/dashboard", dashboardHandler.Dashboard)
 

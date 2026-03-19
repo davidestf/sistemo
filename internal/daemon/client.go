@@ -5,13 +5,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"time"
 )
 
 // DefaultURL is the default daemon base URL when SISTEMO_DAEMON_URL is not set.
-const DefaultURL = "http://127.0.0.1:8080"
+const DefaultURL = "http://127.0.0.1:7777"
 
 // URL returns the daemon base URL from env or default.
 func URL() string {
@@ -31,6 +32,8 @@ type CreateVMRequest struct {
 	StorageMB       int      `json:"storage_mb,omitempty"`
 	AttachedStorage []string `json:"attached_storage,omitempty"`
 	InjectInitSSH   bool     `json:"inject_init_ssh,omitempty"`
+	NetworkBridge   string   `json:"network_bridge,omitempty"`
+	NetworkSubnet   string   `json:"network_subnet,omitempty"`
 }
 
 // CreateVMResponse is the response from POST /vms.
@@ -63,7 +66,7 @@ func CreateVM(baseURL string, req *CreateVMRequest) (*CreateVMResponse, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(resp.Body)
+		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
 		return nil, fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
 	}
 	var out CreateVMResponse
@@ -90,7 +93,7 @@ func DeleteVM(baseURL, vmID string) (bool, error) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(resp.Body)
+		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
 		return false, fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
 	}
 	return true, nil
@@ -113,7 +116,7 @@ func StopVM(baseURL, vmID string) (bool, error) {
 	}
 	if resp.StatusCode != http.StatusOK {
 		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(resp.Body)
+		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
 		return false, fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
 	}
 	return true, nil
@@ -133,7 +136,7 @@ func StartVM(baseURL, vmID string) (*CreateVMResponse, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(resp.Body)
+		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
 		return nil, fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
 	}
 	var out CreateVMResponse
@@ -180,7 +183,7 @@ func ExposePort(baseURL, vmID string, hostPort, vmPort int, protocol string) err
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(resp.Body)
+		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
 		return fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
 	}
 	return nil
@@ -200,7 +203,57 @@ func UnexposePort(baseURL, vmID string, hostPort int) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(resp.Body)
+		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
+		return fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
+	}
+	return nil
+}
+
+// CreateNetwork calls POST /networks on the daemon.
+func CreateNetwork(baseURL, name, subnet, bridgeName string) error {
+	body := struct {
+		Name       string `json:"name"`
+		Subnet     string `json:"subnet"`
+		BridgeName string `json:"bridge_name"`
+	}{Name: name, Subnet: subnet, BridgeName: bridgeName}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/networks", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("daemon request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var errBody bytes.Buffer
+		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
+		return fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
+	}
+	return nil
+}
+
+// DeleteNetwork calls DELETE /networks/{name} on the daemon.
+func DeleteNetwork(baseURL, name string) error {
+	httpReq, err := http.NewRequest(http.MethodDelete, baseURL+"/networks/"+name, nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("daemon request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		var errBody bytes.Buffer
+		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
 		return fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
 	}
 	return nil
@@ -239,7 +292,7 @@ func Exec(baseURL, vmID, script string, timeoutSec int) (*ExecResult, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(resp.Body)
+		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
 		return nil, fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
 	}
 	var out ExecResult

@@ -124,7 +124,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%s up --data-dir=%s
+ExecStart="%s" up --data-dir="%s"
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65535

@@ -12,7 +12,7 @@ import (
 )
 
 type Config struct {
-	Port   int    `envconfig:"PORT" default:"8080"`
+	Port   int    `envconfig:"PORT" default:"7777"`
 	APIKey string `envconfig:"HOST_API_KEY"`
 
 	// Directories (overridden by daemon startup to ~/.sistemo/*)
@@ -152,6 +152,7 @@ func LoadWithFile(configPath string) (*Config, error) {
 }
 
 // applyExplicitEnvOverrides re-applies env vars that are explicitly set (not defaults).
+// This ensures explicitly-set env vars take precedence over YAML file values.
 func applyExplicitEnvOverrides(cfg *Config) {
 	if v := os.Getenv("PORT"); v != "" {
 		var p int
@@ -164,6 +165,31 @@ func applyExplicitEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("HOST_API_KEY"); v != "" {
 		cfg.APIKey = v
+	}
+	if v := os.Getenv("BRIDGE_SUBNET"); v != "" {
+		cfg.BridgeSubnet = v
+	}
+	applyIntEnvOverride("MAX_VCPUS", &cfg.MaxVCPUs)
+	applyIntEnvOverride("MAX_MEMORY_MB", &cfg.MaxMemoryMB)
+	applyIntEnvOverride("MAX_STORAGE_MB", &cfg.MaxStorageMB)
+	applyIntEnvOverride("DEFAULT_BANDWIDTH_MBPS", &cfg.DefaultBandwidthMbps)
+	applyIntEnvOverride("DEFAULT_UPLOAD_MBPS", &cfg.DefaultUploadMbps)
+	applyIntEnvOverride("DEFAULT_IOPS", &cfg.DefaultIOPS)
+	applyIntEnvOverride("DEFAULT_DISK_BW_MBPS", &cfg.DefaultDiskBWMbps)
+	if v := os.Getenv("MIN_DISK_FREE_MB"); v != "" {
+		var n int64
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+			cfg.MinDiskFreeMB = n
+		}
+	}
+}
+
+func applyIntEnvOverride(envKey string, target *int) {
+	if v := os.Getenv(envKey); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+			*target = n
+		}
 	}
 }
 
@@ -181,10 +207,11 @@ func detectDefaultInterface() string {
 		if iface.Flags&net.FlagUp == 0 {
 			continue
 		}
-		// Skip veth, docker, bridge interfaces
+		// Skip veth, docker, bridge, sistemo interfaces
 		name := iface.Name
 		if strings.HasPrefix(name, "veth") || strings.HasPrefix(name, "docker") ||
-			strings.HasPrefix(name, "br-") || strings.HasPrefix(name, "virbr") {
+			strings.HasPrefix(name, "br-") || strings.HasPrefix(name, "virbr") ||
+			strings.HasPrefix(name, "sistemo") {
 			continue
 		}
 		addrs, err := iface.Addrs()

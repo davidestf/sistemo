@@ -30,8 +30,7 @@ func volumeCreateCmd() *cobra.Command {
 				cmd.SilenceUsage = true
 				return fmt.Errorf("volume create: size_mb must be a positive integer")
 			}
-			runStorageCreate(getLogger(cmd), getDataDirFromCmd(cmd), sizeMB, name)
-			return nil
+			return runStorageCreate(getLogger(cmd), getDataDirFromCmd(cmd), sizeMB, name)
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "Volume name (default: first 8 chars of ID)")
@@ -43,8 +42,7 @@ func volumeListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List volumes",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			runStorageList(getLogger(cmd), getDataDirFromCmd(cmd))
-			return nil
+			return runStorageList(getLogger(cmd), getDataDirFromCmd(cmd))
 		},
 	}
 }
@@ -55,8 +53,7 @@ func volumeDeleteCmd() *cobra.Command {
 		Short: "Delete a volume",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			runStorageDelete(getLogger(cmd), getDataDirFromCmd(cmd), args[0])
-			return nil
+			return runStorageDelete(getLogger(cmd), getDataDirFromCmd(cmd), args[0])
 		},
 	}
 }

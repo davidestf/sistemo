@@ -16,6 +16,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	gonet "net"
 	"os/exec"
 	"strings"
 
@@ -25,11 +26,12 @@ import (
 // VMNetwork holds the network configuration for a VM.
 type VMNetwork struct {
 	NamespaceName string
-	VethOut       string // host side, attached to sistemo0 bridge
+	VethOut       string // host side, attached to host bridge
 	VethIn        string // namespace side, attached to namespace bridge
 	NsBridge      string // bridge inside namespace connecting veth-in and TAP
 	TapName       string // TAP device for Firecracker
 	VMIP          string // unique IP from bridge subnet (e.g. 10.200.0.5)
+	HostBridge    string // host bridge to attach to (sistemo0 or br-<name>)
 	Logger        *zap.Logger
 }
 
@@ -68,8 +70,13 @@ func runInNamespace(nsName string, name string, args ...string) (int, string, st
 }
 
 // NewVMNetwork creates a VMNetwork for the given VM ID and its allocated IP.
-func NewVMNetwork(vmID, vmIP string, logger *zap.Logger) *VMNetwork {
+// hostBridge is the host-side bridge to attach to. Empty string defaults to sistemo0.
+func NewVMNetwork(vmID, vmIP string, logger *zap.Logger, hostBridge ...string) *VMNetwork {
 	shortID := getShortID(vmID)
+	bridge := BridgeName
+	if len(hostBridge) > 0 && hostBridge[0] != "" {
+		bridge = hostBridge[0]
+	}
 	return &VMNetwork{
 		NamespaceName: "ns-" + shortID,
 		VethOut:       "vo-" + shortID,
@@ -77,6 +84,7 @@ func NewVMNetwork(vmID, vmIP string, logger *zap.Logger) *VMNetwork {
 		NsBridge:      "nb-" + shortID,
 		TapName:       "tap-" + shortID,
 		VMIP:          vmIP,
+		HostBridge:    bridge,
 		Logger:        logger,
 	}
 }
@@ -114,7 +122,9 @@ func (n *VMNetwork) Create() error {
 		if strings.Contains(out, "File exists") {
 			log.Info("removing existing veth for clean start", zap.String("veth_out", n.VethOut))
 			n.removeNamespaceAndVeth()
-			run("ip", "netns", "add", n.NamespaceName)
+			if rc3, out3, _ := run("ip", "netns", "add", n.NamespaceName); rc3 != 0 {
+				return fmt.Errorf("failed to re-create namespace %s after veth cleanup: %s", n.NamespaceName, out3)
+			}
 			if rc2, out2, _ := run("ip", "link", "add", n.VethOut, "type", "veth", "peer", "name", n.VethIn); rc2 != 0 {
 				n.Cleanup("")
 				return fmt.Errorf("failed to create veth pair after cleanup: %s", out2)
@@ -125,8 +135,8 @@ func (n *VMNetwork) Create() error {
 		}
 	}
 
-	// --- Host side: attach veth-out to sistemo0 bridge, bring up ---
-	if rc, out, _ := run("ip", "link", "set", n.VethOut, "master", BridgeName); rc != 0 {
+	// --- Host side: attach veth-out to host bridge, bring up ---
+	if rc, out, _ := run("ip", "link", "set", n.VethOut, "master", n.HostBridge); rc != 0 {
 		n.Cleanup("")
 		return fmt.Errorf("failed to attach veth to bridge: %s", out)
 	}
@@ -191,7 +201,7 @@ func (n *VMNetwork) Create() error {
 
 	log.Info("network setup complete",
 		zap.String("namespace", n.NamespaceName),
-		zap.String("bridge", BridgeName),
+		zap.String("bridge", n.HostBridge),
 		zap.String("vm_ip", n.VMIP))
 	return nil
 }
@@ -234,7 +244,7 @@ func (n *VMNetwork) ExposePort(_ string, hostPort, vmPort int, protocol string) 
 
 	// DNAT: external traffic (any interface except the bridge itself)
 	if rc, out, _ := run("iptables", "-t", "nat", "-A", "PREROUTING",
-		"!", "-i", BridgeName, "-p", protocol, "--dport", hp,
+		"!", "-i", n.HostBridge, "-p", protocol, "--dport", hp,
 		"-j", "DNAT", "--to-destination", dest); rc != 0 {
 		return fmt.Errorf("PREROUTING DNAT failed: %s", out)
 	}
@@ -243,7 +253,7 @@ func (n *VMNetwork) ExposePort(_ string, hostPort, vmPort int, protocol string) 
 		"-p", protocol, "--dport", hp, "-d", "127.0.0.1",
 		"-j", "DNAT", "--to-destination", dest); rc != 0 {
 		run("iptables", "-t", "nat", "-D", "PREROUTING",
-			"!", "-i", BridgeName, "-p", protocol, "--dport", hp,
+			"!", "-i", n.HostBridge, "-p", protocol, "--dport", hp,
 			"-j", "DNAT", "--to-destination", dest)
 		return fmt.Errorf("OUTPUT DNAT failed: %s", out)
 	}
@@ -252,7 +262,7 @@ func (n *VMNetwork) ExposePort(_ string, hostPort, vmPort int, protocol string) 
 		"-d", n.VMIP, "-p", protocol, "--dport", vp,
 		"-j", "ACCEPT"); rc != 0 {
 		run("iptables", "-t", "nat", "-D", "PREROUTING",
-			"!", "-i", BridgeName, "-p", protocol, "--dport", hp,
+			"!", "-i", n.HostBridge, "-p", protocol, "--dport", hp,
 			"-j", "DNAT", "--to-destination", dest)
 		run("iptables", "-t", "nat", "-D", "OUTPUT",
 			"-p", protocol, "--dport", hp, "-d", "127.0.0.1",
@@ -269,7 +279,7 @@ func (n *VMNetwork) UnexposePort(_ string, hostPort, vmPort int, protocol string
 	dest := fmt.Sprintf("%s:%d", n.VMIP, vmPort)
 
 	run("iptables", "-t", "nat", "-D", "PREROUTING",
-		"!", "-i", BridgeName, "-p", protocol, "--dport", hp,
+		"!", "-i", n.HostBridge, "-p", protocol, "--dport", hp,
 		"-j", "DNAT", "--to-destination", dest)
 	run("iptables", "-t", "nat", "-D", "OUTPUT",
 		"-p", protocol, "--dport", hp, "-d", "127.0.0.1",
@@ -288,9 +298,36 @@ func (n *VMNetwork) CleanupPortRules(_ string, rules []PortRule) {
 }
 
 // GetBootArgs returns the kernel boot args for static IP configuration.
-// The VM configures its eth0 with the unique bridge IP and uses sistemo0 as gateway.
+// The VM configures its eth0 with the unique bridge IP and uses the bridge as gateway.
 func GetBootArgs(vmIP string) string {
-	return fmt.Sprintf("ip=%s::%s:255.255.0.0::eth0:off", vmIP, BridgeIP)
+	// Use the actual netmask from the parsed bridge subnet
+	mask := gonet.CIDRMask(16, 32) // default /16
+	if bridgeIPNet != nil {
+		mask = bridgeIPNet.Mask
+	}
+	netmask := fmt.Sprintf("%d.%d.%d.%d", mask[0], mask[1], mask[2], mask[3])
+	return fmt.Sprintf("ip=%s::%s:%s::eth0:off", vmIP, BridgeIP, netmask)
+}
+
+// GetBootArgsForSubnet returns boot args for a VM on a named network with a specific subnet.
+// The caller must ensure cidr is valid (validated at network creation time).
+func GetBootArgsForSubnet(vmIP, cidr string) string {
+	_, ipNet, err := gonet.ParseCIDR(cidr)
+	if err != nil {
+		// This should never happen — subnet is validated at network creation.
+		// Fall back to default rather than crash, but log a warning.
+		return GetBootArgs(vmIP)
+	}
+	// Gateway = network address + 1 (using 32-bit math for correctness with any prefix length)
+	base := ipNet.IP.To4()
+	baseU32 := uint32(base[0])<<24 | uint32(base[1])<<16 | uint32(base[2])<<8 | uint32(base[3])
+	gwU32 := baseU32 + 1
+	gw := gonet.IP{byte(gwU32 >> 24), byte(gwU32 >> 16), byte(gwU32 >> 8), byte(gwU32)}
+	ones, _ := ipNet.Mask.Size()
+	// Convert prefix length to netmask
+	mask := gonet.CIDRMask(ones, 32)
+	netmask := fmt.Sprintf("%d.%d.%d.%d", mask[0], mask[1], mask[2], mask[3])
+	return fmt.Sprintf("ip=%s::%s:%s::eth0:off", vmIP, gw.String(), netmask)
 }
 
 // CleanupAllNamespaces removes all ns-* namespaces and their veth/iptables (for startup cleanup).

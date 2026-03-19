@@ -10,8 +10,7 @@ func installCmd() *cobra.Command {
 		Use:   "install",
 		Short: "Set up ~/.sistemo: download Firecracker + kernel, generate SSH key, check KVM",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			runInstall(getLogger(cmd), getDataDirFromCmd(cmd), upgrade)
-			return nil
+			return runInstall(getLogger(cmd), getDataDirFromCmd(cmd), upgrade)
 		},
 	}
 	cmd.Flags().BoolVar(&upgrade, "upgrade", false, "Re-download Firecracker and kernel even if already present")
