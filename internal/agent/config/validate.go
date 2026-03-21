@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"os"
 	"runtime"
 )
 
@@ -43,6 +44,18 @@ func Validate(cfg *Config) error {
 		ones, _ := ipNet.Mask.Size()
 		if ones > 24 {
 			return fmt.Errorf("BRIDGE_SUBNET %q is too small (must be /24 or larger, got /%d)", cfg.BridgeSubnet, ones)
+		}
+	}
+
+	// Validate critical paths
+	if cfg.FirecrackerBin != "" {
+		if _, err := os.Stat(cfg.FirecrackerBin); err != nil {
+			return fmt.Errorf("FIRECRACKER_BINARY_PATH %q not found: %w", cfg.FirecrackerBin, err)
+		}
+	}
+	if cfg.KernelImagePath != "" {
+		if _, err := os.Stat(cfg.KernelImagePath); err != nil {
+			return fmt.Errorf("KERNEL_IMAGE_PATH %q not found: %w", cfg.KernelImagePath, err)
 		}
 	}
 

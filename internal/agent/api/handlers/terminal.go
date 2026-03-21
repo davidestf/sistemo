@@ -92,8 +92,8 @@ func (h *Terminal) TerminalPageOrWebSocket(w http.ResponseWriter, r *http.Reques
 // serveTerminalPage writes an HTML page that loads xterm.js and opens a WebSocket to this same URL.
 func (h *Terminal) serveTerminalPage(w http.ResponseWriter, r *http.Request) {
 	vmID := chi.URLParam(r, "vmID")
-	if vmID == "" {
-		writeError(w, http.StatusNotFound, "VM id required")
+	if vmID == "" || !isValidSafeID(vmID) {
+		writeError(w, http.StatusBadRequest, "invalid VM id")
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -162,6 +162,10 @@ func terminalPageHTML(wsURL string) string {
 
 func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 	vmID := chi.URLParam(r, "vmID")
+	if vmID == "" || !isValidSafeID(vmID) {
+		writeError(w, http.StatusBadRequest, "invalid VM id")
+		return
+	}
 
 	ns := h.mgr.GetVMNamespace(vmID)
 	if ns == "" && h.db != nil {
@@ -224,8 +228,14 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sshCmd := exec.Command("ssh", sshArgs...)
-	// LANG/LC_ALL=C avoids "cannot change locale (en_GB.UTF-8)" in minimal VM images that don't have that locale generated.
-	sshCmd.Env = append(os.Environ(), "TERM=xterm-256color", "LANG=C", "LC_ALL=C")
+	sshCmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // own session so Kill(-pid) doesn't kill daemon; Setsid works with PTY unlike Setpgid
+	sshCmd.Env = []string{
+		"TERM=xterm-256color",
+		"LANG=C",
+		"LC_ALL=C",
+		"PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+		"HOME=" + os.Getenv("HOME"),
+	}
 
 	// Start SSH under a PTY with the client's initial terminal size
 	ptmx, err := pty.StartWithSize(sshCmd, &pty.Winsize{

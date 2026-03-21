@@ -148,7 +148,8 @@ func StartVM(baseURL, vmID string) (*CreateVMResponse, error) {
 
 // Health calls GET /health on the daemon.
 func Health(baseURL string) error {
-	resp, err := http.Get(baseURL + "/health")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(baseURL + "/health")
 	if err != nil {
 		return err
 	}

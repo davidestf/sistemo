@@ -65,6 +65,7 @@ func deleteVM(ctx context.Context, m *Manager, vmID string, preserveStorage bool
 					net.CleanupPortRules(m.cfg.HostInterface, rules)
 				}
 			}
+			m.db.Exec("DELETE FROM port_rule WHERE vm_id = ?", vmID)
 		}
 	}
 
@@ -186,6 +187,15 @@ func stopVM(ctx context.Context, m *Manager, vmID string) (bool, error) {
 			bridge = vmInfo.NetworkBridge
 		} else {
 			vmIP = network.GetAllocatedIP(m.db, vmID)
+			// Read bridge from vm_spec.json (same as deleteVM does)
+			if specData, err := os.ReadFile(filepath.Join(vmDir, "vm_spec.json")); err == nil {
+				var spec struct {
+					NetworkBridge string `json:"network_bridge"`
+				}
+				if json.Unmarshal(specData, &spec) == nil {
+					bridge = spec.NetworkBridge
+				}
+			}
 		}
 		if vmIP != "" {
 			rows, err := m.db.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", vmID)
@@ -269,7 +279,7 @@ func isFirecrackerProcess(pid int, vmID string) bool {
 	}
 	cmdline := strings.ReplaceAll(string(data), "\x00", " ")
 	isFC := strings.Contains(cmdline, "firecracker")
-	isIPNetns := strings.Contains(cmdline, "ip") && strings.Contains(cmdline, "netns")
+	isIPNetns := strings.Contains(cmdline, "ip netns exec")
 	return (isFC || isIPNetns) && strings.Contains(cmdline, vmID)
 }
 

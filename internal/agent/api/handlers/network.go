@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	gonet "net"
 	"net/http"
 	"regexp"
 
@@ -46,11 +47,27 @@ func (h *Network) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bridge_name must be 1-15 alphanumeric/dash/underscore characters")
 		return
 	}
+	if !isValidSafeID(req.Name) {
+		writeError(w, http.StatusBadRequest, "invalid network name")
+		return
+	}
+	// Validate subnet is a valid IPv4 CIDR
+	if _, _, err := gonet.ParseCIDR(req.Subnet); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid subnet: must be a valid CIDR (e.g. 10.201.0.0/24)")
+		return
+	}
 
 	if err := network.CreateNamedBridge(req.BridgeName, req.Subnet, h.logger); err != nil {
 		h.logger.Error("create named bridge failed", zap.String("bridge", req.BridgeName), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// Persist network record so Delete can look up the bridge_name.
+	if h.db != nil {
+		h.db.Exec(`INSERT INTO network (name, subnet, bridge_name, created_at) VALUES (?, ?, ?, datetime('now'))
+			ON CONFLICT(name) DO UPDATE SET subnet=excluded.subnet, bridge_name=excluded.bridge_name`,
+			req.Name, req.Subnet, req.BridgeName)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{
@@ -93,6 +110,11 @@ func (h *Network) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	network.DeleteNamedBridge(bridgeName, h.logger)
+
+	// Delete network record from DB
+	if h.db != nil {
+		h.db.Exec("DELETE FROM network WHERE name = ?", name)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"name":   name,

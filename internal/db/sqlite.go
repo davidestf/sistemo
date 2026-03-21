@@ -114,11 +114,21 @@ func runMigrations(db *sql.DB) error {
 		if err != nil {
 			return err
 		}
-		if _, err := db.Exec(string(body)); err != nil {
+		// Run migration + tracking insert in a transaction to prevent half-applied state
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin migration %s: %w", name, err)
+		}
+		if _, err := tx.Exec(string(body)); err != nil {
+			tx.Rollback()
 			return fmt.Errorf("migration %s: %w", name, err)
 		}
-		if _, err := db.Exec("INSERT INTO schema_migration (name) VALUES (?)", name); err != nil {
+		if _, err := tx.Exec("INSERT INTO schema_migration (name) VALUES (?)", name); err != nil {
+			tx.Rollback()
 			return fmt.Errorf("record migration %s: %w", name, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %s: %w", name, err)
 		}
 	}
 	return nil
