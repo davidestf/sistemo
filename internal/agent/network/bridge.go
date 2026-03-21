@@ -171,10 +171,19 @@ func CreateNamedBridge(bridgeName, cidr string, logger *zap.Logger) error {
 		return fmt.Errorf("bring up bridge %s: %s", bridgeName, out)
 	}
 
+	// Enable route_localnet so localhost DNAT works for port forwarding.
+	run("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.route_localnet=1", bridgeName))
+
 	// MASQUERADE for outbound
 	rc, _, _ = run("iptables", "-t", "nat", "-C", "POSTROUTING", "-s", cidr, "!", "-o", bridgeName, "-j", "MASQUERADE")
 	if rc != 0 {
 		run("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", cidr, "!", "-o", bridgeName, "-j", "MASQUERADE")
+	}
+	// MASQUERADE: localhost → VM. Rewrite source from 127.0.0.1 to bridge IP
+	// so the VM can reply back to the host instead of its own loopback.
+	rc, _, _ = run("iptables", "-t", "nat", "-C", "POSTROUTING", "-s", "127.0.0.0/8", "-o", bridgeName, "-j", "MASQUERADE")
+	if rc != 0 {
+		run("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", "127.0.0.0/8", "-o", bridgeName, "-j", "MASQUERADE")
 	}
 
 	// FORWARD: allow same-bridge traffic (VM-to-VM within this network)
@@ -289,6 +298,7 @@ func DeleteNamedBridge(bridgeName string, logger *zap.Logger) {
 			}
 		}
 	}
+	run("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", "127.0.0.0/8", "-o", bridgeName, "-j", "MASQUERADE")
 	run("iptables", "-D", "FORWARD", "-i", bridgeName, "!", "-o", bridgeName, "-j", "ACCEPT")
 	run("iptables", "-D", "FORWARD", "!", "-i", bridgeName, "-o", bridgeName, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
 	run("iptables", "-D", "FORWARD", "-i", bridgeName, "-o", bridgeName, "-j", "ACCEPT")

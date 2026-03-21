@@ -2,6 +2,7 @@ package vm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,21 +28,42 @@ func deleteVM(ctx context.Context, m *Manager, vmID string, preserveStorage bool
 	vmInfo := m.vms[vmID]
 	m.mu.RUnlock()
 
-	// Clean up port expose iptables rules (under the VM lock, so no race with concurrent Expose)
-	if m.db != nil && vmInfo != nil && vmInfo.IP != "" {
-		rows, err := m.db.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", vmID)
-		if err == nil {
-			var rules []network.PortRule
-			for rows.Next() {
-				var r network.PortRule
-				if rows.Scan(&r.HostPort, &r.VMPort, &r.Protocol) == nil {
-					rules = append(rules, r)
+	// Clean up port expose iptables rules.
+	// Use in-memory info if available, otherwise look up IP from DB so we don't
+	// orphan iptables rules when the daemon doesn't know about the VM.
+	if m.db != nil {
+		vmIP := ""
+		bridge := ""
+		if vmInfo != nil {
+			vmIP = vmInfo.IP
+			bridge = vmInfo.NetworkBridge
+		} else {
+			vmIP = network.GetAllocatedIP(m.db, vmID)
+			// Try to get bridge from vm_spec.json
+			if specData, err := os.ReadFile(filepath.Join(vmDir, "vm_spec.json")); err == nil {
+				var spec struct {
+					NetworkBridge string `json:"network_bridge"`
+				}
+				if json.Unmarshal(specData, &spec) == nil {
+					bridge = spec.NetworkBridge
 				}
 			}
-			rows.Close()
-			if len(rules) > 0 {
-				net := network.NewVMNetwork(vmID, vmInfo.IP, m.logger, vmInfo.NetworkBridge)
-				net.CleanupPortRules(m.cfg.HostInterface, rules)
+		}
+		if vmIP != "" {
+			rows, err := m.db.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", vmID)
+			if err == nil {
+				var rules []network.PortRule
+				for rows.Next() {
+					var r network.PortRule
+					if rows.Scan(&r.HostPort, &r.VMPort, &r.Protocol) == nil {
+						rules = append(rules, r)
+					}
+				}
+				rows.Close()
+				if len(rules) > 0 {
+					net := network.NewVMNetwork(vmID, vmIP, m.logger, bridge)
+					net.CleanupPortRules(m.cfg.HostInterface, rules)
+				}
 			}
 		}
 	}
@@ -156,20 +178,30 @@ func stopVM(ctx context.Context, m *Manager, vmID string) (bool, error) {
 	}
 
 	// Clean up port expose iptables rules (DB rows kept so they can be re-applied on start)
-	if m.db != nil && vmInfo != nil && vmInfo.IP != "" {
-		rows, err := m.db.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", vmID)
-		if err == nil {
-			var rules []network.PortRule
-			for rows.Next() {
-				var r network.PortRule
-				if rows.Scan(&r.HostPort, &r.VMPort, &r.Protocol) == nil {
-					rules = append(rules, r)
+	if m.db != nil {
+		vmIP := ""
+		bridge := ""
+		if vmInfo != nil {
+			vmIP = vmInfo.IP
+			bridge = vmInfo.NetworkBridge
+		} else {
+			vmIP = network.GetAllocatedIP(m.db, vmID)
+		}
+		if vmIP != "" {
+			rows, err := m.db.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", vmID)
+			if err == nil {
+				var rules []network.PortRule
+				for rows.Next() {
+					var r network.PortRule
+					if rows.Scan(&r.HostPort, &r.VMPort, &r.Protocol) == nil {
+						rules = append(rules, r)
+					}
 				}
-			}
-			rows.Close()
-			if len(rules) > 0 {
-				net := network.NewVMNetwork(vmID, vmInfo.IP, m.logger, vmInfo.NetworkBridge)
-				net.CleanupPortRules(m.cfg.HostInterface, rules)
+				rows.Close()
+				if len(rules) > 0 {
+					net := network.NewVMNetwork(vmID, vmIP, m.logger, bridge)
+					net.CleanupPortRules(m.cfg.HostInterface, rules)
+				}
 			}
 		}
 	}
