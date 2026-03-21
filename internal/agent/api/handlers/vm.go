@@ -153,11 +153,14 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.mgr.Create(r.Context(), createReq)
 	if err != nil {
-		// Mark as error in DB
+		// Clean up immediately — don't leave failed VMs lingering in the DB.
 		if h.db != nil {
-			h.db.Exec("UPDATE vm SET status = 'error', maintenance_operation = NULL, last_state_change = ? WHERE id = ?",
-				time.Now().UTC().Format(time.RFC3339), vmid)
+			h.db.Exec(`DELETE FROM ip_allocation WHERE vm_id = ?`, vmid)
+			h.db.Exec(`DELETE FROM port_rule WHERE vm_id = ?`, vmid)
+			h.db.Exec(`DELETE FROM vm WHERE id = ?`, vmid)
 		}
+		vmDir := filepath.Join(h.cfg.VMBaseDir, vmid)
+		os.RemoveAll(vmDir)
 		db.LogAction(h.db, "create", "vm", vmid, name, err.Error(), false)
 		h.logger.Error("create VM failed", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
