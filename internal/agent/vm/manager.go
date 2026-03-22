@@ -317,6 +317,11 @@ func (m *Manager) restorePortRules() {
 		if !ok || info.IP == "" {
 			continue
 		}
+		// Flush any stale DNAT rules for this host port before re-adding.
+		// Handles cases where VM IP changed (reboot, redeployment) or duplicate
+		// rules accumulated from previous daemon runs.
+		network.FlushDNATRulesForPort(hostPort, protocol)
+
 		net := network.NewVMNetwork(vmID, info.IP, m.logger, info.NetworkBridge)
 		if err := net.ExposePort(m.cfg.HostInterface, hostPort, vmPort, protocol); err != nil {
 			m.logger.Warn("failed to restore port rule",
