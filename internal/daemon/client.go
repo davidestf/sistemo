@@ -22,6 +22,34 @@ func URL() string {
 	return DefaultURL
 }
 
+// setAuthHeaders adds API key header if HOST_API_KEY is set.
+func setAuthHeaders(req *http.Request) {
+	if key := os.Getenv("HOST_API_KEY"); key != "" {
+		req.Header.Set("X-API-Key", key)
+	}
+}
+
+// doRequest is a helper that sets auth headers, executes the request, and checks for errors.
+func doRequest(req *http.Request, timeout time.Duration) (*http.Response, error) {
+	setAuthHeaders(req)
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("daemon request: %w", err)
+	}
+	return resp, nil
+}
+
+// checkResponse reads the response and returns an error if status is not OK (200).
+func checkResponse(resp *http.Response) error {
+	if resp.StatusCode != http.StatusOK {
+		var errBody bytes.Buffer
+		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
+		return fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
+	}
+	return nil
+}
+
 // CreateVMRequest is the JSON body for POST /vms.
 type CreateVMRequest struct {
 	VMID            string   `json:"vm_id,omitempty"`
@@ -57,17 +85,13 @@ func CreateVM(baseURL string, req *CreateVMRequest) (*CreateVMResponse, error) {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	// Create can take a long time: download rootfs from URL, copy, boot, wait for SSH (templates may be hundreds of MB).
-	client := &http.Client{Timeout: 600 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := doRequest(httpReq, 600*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("daemon request: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
+	if err := checkResponse(resp); err != nil {
+		return nil, err
 	}
 	var out CreateVMResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -82,62 +106,53 @@ func DeleteVM(baseURL, vmID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := doRequest(httpReq, 30*time.Second)
 	if err != nil {
-		return false, fmt.Errorf("daemon request: %w", err)
+		return false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		return false, nil
 	}
-	if resp.StatusCode != http.StatusOK {
-		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
-		return false, fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
+	if err := checkResponse(resp); err != nil {
+		return false, err
 	}
 	return true, nil
 }
 
-// StopVM calls POST /vms/{vmID}/stop on the daemon. VM is stopped but vmDir is kept.
+// StopVM calls POST /vms/{vmID}/stop on the daemon.
 func StopVM(baseURL, vmID string) (bool, error) {
 	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/vms/"+vmID+"/stop", nil)
 	if err != nil {
 		return false, err
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := doRequest(httpReq, 30*time.Second)
 	if err != nil {
-		return false, fmt.Errorf("daemon request: %w", err)
+		return false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
 		return false, nil
 	}
-	if resp.StatusCode != http.StatusOK {
-		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
-		return false, fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
+	if err := checkResponse(resp); err != nil {
+		return false, err
 	}
 	return true, nil
 }
 
-// StartVM calls POST /vms/{vmID}/start on the daemon. Returns create-like response with namespace and IP.
+// StartVM calls POST /vms/{vmID}/start on the daemon.
 func StartVM(baseURL, vmID string) (*CreateVMResponse, error) {
 	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/vms/"+vmID+"/start", nil)
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := doRequest(httpReq, 120*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("daemon request: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
+	if err := checkResponse(resp); err != nil {
+		return nil, err
 	}
 	var out CreateVMResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -148,8 +163,11 @@ func StartVM(baseURL, vmID string) (*CreateVMResponse, error) {
 
 // Health calls GET /health on the daemon.
 func Health(baseURL string) error {
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(baseURL + "/health")
+	httpReq, err := http.NewRequest(http.MethodGet, baseURL+"/health", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := doRequest(httpReq, 5*time.Second)
 	if err != nil {
 		return err
 	}
@@ -176,18 +194,12 @@ func ExposePort(baseURL, vmID string, hostPort, vmPort int, protocol string) err
 		return err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := doRequest(httpReq, 30*time.Second)
 	if err != nil {
-		return fmt.Errorf("daemon request: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
-	}
-	return nil
+	return checkResponse(resp)
 }
 
 // UnexposePort calls DELETE /vms/{vmID}/expose/{hostPort} on the daemon.
@@ -196,18 +208,12 @@ func UnexposePort(baseURL, vmID string, hostPort int) error {
 	if err != nil {
 		return err
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := doRequest(httpReq, 30*time.Second)
 	if err != nil {
-		return fmt.Errorf("daemon request: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
-	}
-	return nil
+	return checkResponse(resp)
 }
 
 // CreateNetwork calls POST /networks on the daemon.
@@ -226,18 +232,12 @@ func CreateNetwork(baseURL, name, subnet, bridgeName string) error {
 		return err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := doRequest(httpReq, 30*time.Second)
 	if err != nil {
-		return fmt.Errorf("daemon request: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
-	}
-	return nil
+	return checkResponse(resp)
 }
 
 // DeleteNetwork calls DELETE /networks/{name} on the daemon.
@@ -246,16 +246,13 @@ func DeleteNetwork(baseURL, name string) error {
 	if err != nil {
 		return err
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := doRequest(httpReq, 30*time.Second)
 	if err != nil {
-		return fmt.Errorf("daemon request: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
-		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
+		return checkResponse(resp)
 	}
 	return nil
 }
@@ -285,16 +282,13 @@ func Exec(baseURL, vmID, script string, timeoutSec int) (*ExecResult, error) {
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: time.Duration(timeoutSec+5) * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := doRequest(httpReq, time.Duration(timeoutSec+5)*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("daemon request: %w", err)
+		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		var errBody bytes.Buffer
-		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
-		return nil, fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
+	if err := checkResponse(resp); err != nil {
+		return nil, err
 	}
 	var out ExecResult
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
