@@ -25,6 +25,7 @@ import (
 
 	"github.com/davidestf/sistemo/internal/agent/api"
 	"github.com/davidestf/sistemo/internal/agent/config"
+	"github.com/davidestf/sistemo/internal/agent/network"
 	"github.com/davidestf/sistemo/internal/agent/vm"
 	"github.com/davidestf/sistemo/internal/daemon"
 	"github.com/davidestf/sistemo/internal/db"
@@ -605,6 +606,51 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 		}
 	}
 
+	// Clean up stale iptables port rules for VMs that no longer exist.
+	// This handles the case where the daemon was killed with VMs still running.
+	{
+		rows, _ := database.Query(`SELECT pr.vm_id, pr.host_port, pr.vm_port, pr.protocol
+			FROM port_rule pr LEFT JOIN vm v ON pr.vm_id = v.id
+			WHERE v.id IS NULL OR v.status = 'destroyed'`)
+		if rows != nil {
+			var staleVMIDs []string
+			cleaned := 0
+			for rows.Next() {
+				var vmID string
+				var hostPort, vmPort int
+				var protocol string
+				if rows.Scan(&vmID, &hostPort, &vmPort, &protocol) == nil {
+					vmIP := network.GetAllocatedIP(database, vmID)
+					if vmIP != "" {
+						// Read bridge from vm_spec.json if it exists
+						var bridge string
+						specPath := filepath.Join(dataDir, "vms", vmID, "vm_spec.json")
+						if specData, err := os.ReadFile(specPath); err == nil {
+							var spec struct{ NetworkBridge string `json:"network_bridge"` }
+							json.Unmarshal(specData, &spec)
+							bridge = spec.NetworkBridge
+						}
+						n := network.NewVMNetwork(vmID, vmIP, logger, bridge)
+						n.UnexposePort(cfg.HostInterface, hostPort, vmPort, protocol)
+					}
+					staleVMIDs = append(staleVMIDs, vmID)
+					cleaned++
+				}
+			}
+			rows.Close()
+			// Delete stale port_rule rows (SQLite doesn't support aliases in DELETE)
+			for _, id := range staleVMIDs {
+				database.Exec(`DELETE FROM port_rule WHERE vm_id = ?`, id)
+			}
+			if cleaned > 0 {
+				logger.Info("cleaned up stale port rules from previous run", zap.Int("count", cleaned))
+			}
+		}
+	}
+
+	// Clean up stale ip_allocation rows for destroyed or missing VMs
+	database.Exec(`DELETE FROM ip_allocation WHERE vm_id NOT IN (SELECT id FROM vm WHERE status IN ('running', 'stopped'))`)
+
 	if syscall.Geteuid() != 0 {
 		logger.Warn("daemon running as non-root — VM create will fail (mount/namespace need root). Stop and run: sudo ./sistemo up")
 	}
@@ -718,7 +764,7 @@ func fetchRegistryIndex() *registryIndex {
 }
 
 // knownRemoteImages is the fallback list when the registry is unreachable.
-var knownRemoteImages = []string{"debian", "ubuntu", "fedora", "almalinux", "archlinux"}
+var knownRemoteImages = []string{"debian", "ubuntu", "almalinux"}
 
 // archSuffix returns "-arm64" on ARM64 systems, empty string on x86_64.
 func archSuffix() string {

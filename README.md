@@ -24,7 +24,7 @@ That's it. Real Debian VM, real systemd, real package managers, SSH access. Runn
 ## What you can do
 
 ```bash
-# Deploy from the registry (debian, ubuntu, fedora, almalinux, archlinux)
+# Deploy from the registry (debian, ubuntu, almalinux)
 sistemo vm deploy debian
 sistemo vm deploy ubuntu --name dev --vcpus 4 --memory 2G
 

@@ -123,11 +123,22 @@ mkdir -p "$TMPDIR/sbin"
 rm -f "$TMPDIR/sbin/init"
 ln -s /init "$TMPDIR/sbin/init"
 
+# Fix Docker log symlinks: Docker images symlink logs to /dev/stdout and /dev/stderr
+# for container logging. These don't work reliably in VMs because nginx (and similar
+# services) open log files before /dev is fully initialized by systemd.
+# Replace ALL /dev/stdout, /dev/stderr, /dev/null symlinks with real empty files.
+# This is the only approach that works for ALL Docker images generically.
+find "$TMPDIR" -type l \( -lname '/dev/stderr' -o -lname '/dev/stdout' -o -lname '/dev/null' \) 2>/dev/null | while read -r link; do
+  rm -f "$link"
+  touch "$link"
+done
+
 echo "Creating ext4 image ($ROOTFS_MB MB)..."
 dd if=/dev/zero of="$OUTPUT" bs=1M count="$ROOTFS_MB" status=progress 2>/dev/null || dd if=/dev/zero of="$OUTPUT" bs=1M count="$ROOTFS_MB"
 mke2fs -t ext4 -F "$OUTPUT" -q
 MNT=$(mktemp -d)
 mount -o loop "$OUTPUT" "$MNT"
+trap "umount '$MNT' 2>/dev/null || true; rmdir '$MNT' 2>/dev/null || true; rm -rf '$TMPDIR'" EXIT
 cp -a "$TMPDIR"/* "$MNT/"
 umount "$MNT"
 rmdir "$MNT"

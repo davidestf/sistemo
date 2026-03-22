@@ -32,16 +32,20 @@ type Manager struct {
 
 func NewManager(cfg *config.Config, logger *zap.Logger, db *sql.DB) *Manager {
 	m := &Manager{cfg: cfg, logger: logger, db: db, vms: make(map[string]*VMInfo)}
-	os.MkdirAll(cfg.VMBaseDir, 0755)
+	if err := os.MkdirAll(cfg.VMBaseDir, 0755); err != nil {
+		logger.Fatal("failed to create VM base directory", zap.String("path", cfg.VMBaseDir), zap.Error(err))
+	}
 
 	// Parse bridge subnet from config and create the bridge
 	if err := network.ParseBridgeSubnet(cfg.BridgeSubnet); err != nil {
 		logger.Fatal("invalid bridge_subnet", zap.Error(err))
 	}
 	if err := network.EnsureBridge(cfg.HostInterface, logger); err != nil {
-		logger.Error("failed to create bridge", zap.Error(err))
+		logger.Fatal("failed to create bridge — VM networking will not work", zap.Error(err))
 	}
+	m.cleanupStaleBridges()
 	m.rehydrateFromDisk()
+	m.cleanupDeadRunningVMs()
 	m.restorePortRules()
 	preserve := make(map[string]struct{})
 	m.mu.RLock()
@@ -78,6 +82,19 @@ func (m *Manager) reconcile() {
 			continue
 		}
 		if syscall.Kill(info.PID, 0) != nil {
+			// Acquire per-VM lock to prevent race with concurrent Start/Create
+			lock := m.getVMLock(vmID)
+			lock.Lock()
+
+			// Re-check: another operation may have re-registered this VM with a new PID
+			m.mu.RLock()
+			current, exists := m.vms[vmID]
+			m.mu.RUnlock()
+			if exists && current.PID != info.PID {
+				lock.Unlock()
+				continue // VM was restarted, skip cleanup
+			}
+
 			m.logger.Warn("reconciler: VM process dead, cleaning up",
 				zap.String("vm_id", vmID), zap.Int("pid", info.PID))
 			// Clean up port expose iptables rules before removing network
@@ -105,7 +122,14 @@ func (m *Manager) reconcile() {
 				ns := &network.VMNetwork{NamespaceName: info.Namespace, Logger: m.logger}
 				ns.Cleanup(m.cfg.HostInterface)
 			}
+			// Update DB status and release IP so resources don't leak.
+			if m.db != nil {
+				m.db.Exec("UPDATE vm SET status = 'error', maintenance_operation = 'process_died', last_state_change = ? WHERE id = ?",
+					time.Now().UTC().Format(time.RFC3339), vmID)
+			}
+			network.ReleaseIP(m.db, vmID)
 			m.unregisterVM(vmID)
+			lock.Unlock()
 		}
 	}
 }
@@ -145,7 +169,8 @@ func (m *Manager) rehydrateFromDisk() {
 		}
 		vmIP := network.GetAllocatedIP(m.db, vmID)
 		if vmIP == "" {
-			vmIP = "10.200.0.2" // fallback for VMs created before bridge migration
+			m.logger.Warn("skipping rehydration: no IP in DB for VM", zap.String("vm_id", vmID))
+			continue
 		}
 		// Read network bridge from vm_spec.json (for named network VMs)
 		var netBridge string
@@ -166,6 +191,70 @@ func (m *Manager) rehydrateFromDisk() {
 			NetworkBridge: netBridge,
 		})
 		m.logger.Info("rehydrated VM from disk", zap.String("vm_id", vmID), zap.String("namespace", namespace), zap.Int("pid", pid), zap.String("ip", vmIP))
+	}
+}
+
+// cleanupStaleBridges removes br-* bridges that exist on the system but are NOT in the
+// network DB table. This handles bridges left behind from previous sessions (daemon crash,
+// DB reset, etc.) that would otherwise cause subnet conflicts on network create.
+func (m *Manager) cleanupStaleBridges() {
+	if m.db == nil {
+		return
+	}
+
+	// Get bridges from DB
+	knownBridges := make(map[string]bool)
+	knownBridges[network.BridgeName] = true // sistemo0 is always known
+	rows, err := m.db.Query("SELECT bridge_name FROM network")
+	if err == nil {
+		for rows.Next() {
+			var name string
+			if rows.Scan(&name) == nil {
+				knownBridges[name] = true
+			}
+		}
+		rows.Close()
+	}
+
+	// Get br-* bridges from system
+	for _, br := range network.ListNamedBridges() {
+		if !knownBridges[br] {
+			m.logger.Info("removing stale bridge not in DB", zap.String("bridge", br))
+			network.DeleteNamedBridge(br, m.logger)
+		}
+	}
+}
+
+// cleanupDeadRunningVMs finds DB rows with status='running' that were NOT rehydrated
+// (their process died while daemon was down). Marks them as error and releases resources.
+func (m *Manager) cleanupDeadRunningVMs() {
+	if m.db == nil {
+		return
+	}
+	rows, err := m.db.Query("SELECT id FROM vm WHERE status = 'running'")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	var deadIDs []string
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) != nil {
+			continue
+		}
+		m.mu.RLock()
+		_, alive := m.vms[id]
+		m.mu.RUnlock()
+		if !alive {
+			deadIDs = append(deadIDs, id)
+		}
+	}
+	for _, id := range deadIDs {
+		m.db.Exec("UPDATE vm SET status = 'error', maintenance_operation = 'process_died', last_state_change = ? WHERE id = ?",
+			time.Now().UTC().Format(time.RFC3339), id)
+		m.db.Exec("DELETE FROM port_rule WHERE vm_id = ?", id)
+		network.ReleaseIP(m.db, id)
+		m.logger.Info("cleaned up dead running VM from previous run", zap.String("vm_id", id))
 	}
 }
 

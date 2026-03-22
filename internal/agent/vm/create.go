@@ -225,11 +225,13 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 		req.BandwidthMbps, req.UploadMbps, req.DiskIOPS, req.DiskBWMbps}
 	specData, err := json.Marshal(spec)
 	if err != nil {
+		syscall.Kill(-pid, syscall.SIGKILL) // kill orphaned Firecracker process
 		os.RemoveAll(vmDir)
 		cleanup()
 		return nil, fmt.Errorf("marshal vm_spec: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(vmDir, "vm_spec.json"), specData, 0644); err != nil {
+		syscall.Kill(-pid, syscall.SIGKILL) // kill orphaned Firecracker process
 		os.RemoveAll(vmDir)
 		cleanup()
 		return nil, fmt.Errorf("write vm_spec.json: %w", err)
@@ -301,16 +303,49 @@ func validateImageURL(rawURL string) error {
 	return nil
 }
 
+// ssrfSafeClient returns an HTTP client that rejects connections to private/loopback IPs
+// at dial time, preventing DNS rebinding attacks.
+func ssrfSafeClient() *http.Client {
+	return &http.Client{
+		Timeout: 5 * time.Minute,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				host, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					return nil, err
+				}
+				ips, err := net.DefaultResolver.LookupHost(ctx, host)
+				if err != nil {
+					return nil, err
+				}
+				for _, ipStr := range ips {
+					ip := net.ParseIP(ipStr)
+					if ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()) {
+						return nil, fmt.Errorf("blocked: %s resolves to private IP %s", host, ipStr)
+					}
+				}
+				dialer := &net.Dialer{}
+				return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0], port))
+			},
+		},
+	}
+}
+
 // downloadFromURL downloads url to dest (creates parent dirs). Decompresses gzip if needed. Returns path and optional SHA256 hex.
 func downloadFromURL(rawurl, dest string) (string, *string, error) {
 	if err := validateImageURL(rawurl); err != nil {
 		return "", nil, err
 	}
 	if _, err := os.Stat(dest); err == nil {
-		return dest, nil, nil
+		// Verify cached file is valid ext4 before returning
+		if verifyExt4Superblock(dest) != nil {
+			os.Remove(dest) // corrupt cache, re-download
+		} else {
+			return dest, nil, nil
+		}
 	}
 	os.MkdirAll(filepath.Dir(dest), 0755)
-	client := &http.Client{Timeout: 5 * time.Minute}
+	client := ssrfSafeClient()
 	resp, err := client.Get(rawurl)
 	if err != nil {
 		return "", nil, err
@@ -319,41 +354,55 @@ func downloadFromURL(rawurl, dest string) (string, *string, error) {
 	if resp.StatusCode/100 != 2 {
 		return "", nil, errors.New(resp.Status)
 	}
-	f, err := os.Create(dest)
+
+	// Write to temp file, rename on success (prevents corrupt cache from partial downloads)
+	tmpDest := dest + ".downloading"
+	f, err := os.Create(tmpDest)
 	if err != nil {
 		return "", nil, err
 	}
-	defer f.Close()
+	defer func() {
+		f.Close()
+		os.Remove(tmpDest) // cleanup temp file if we didn't rename it
+	}()
 	h := sha256.New()
 
-	var src io.Reader = resp.Body
+	// Limit download to 50GB to prevent disk exhaustion from malicious URLs
+	const maxDownloadSize = 50 * 1024 * 1024 * 1024 // 50 GB
+	body := io.LimitReader(resp.Body, maxDownloadSize)
+
+	var src io.Reader = body
 	// If response is gzip (by header or magic), decompress so we write a valid ext4 image for mount/inject.
 	if resp.Header.Get("Content-Encoding") == "gzip" {
-		zr, err := gzip.NewReader(resp.Body)
+		zr, err := gzip.NewReader(body)
 		if err != nil {
-			os.Remove(dest)
 			return "", nil, fmt.Errorf("gzip reader: %w", err)
 		}
 		defer zr.Close()
 		src = zr
 	} else {
 		peek := make([]byte, 2)
-		n, _ := io.ReadFull(resp.Body, peek)
+		n, _ := io.ReadFull(body, peek)
 		if n == 2 && peek[0] == 0x1f && peek[1] == 0x8b {
-			zr, err := gzip.NewReader(io.MultiReader(bytes.NewReader(peek), resp.Body))
+			zr, err := gzip.NewReader(io.MultiReader(bytes.NewReader(peek), body))
 			if err != nil {
-				os.Remove(dest)
 				return "", nil, fmt.Errorf("gzip reader: %w", err)
 			}
 			defer zr.Close()
 			src = zr
 		} else {
-			src = io.MultiReader(bytes.NewReader(peek[:n]), resp.Body)
+			src = io.MultiReader(bytes.NewReader(peek[:n]), body)
 		}
 	}
 	if _, err := io.Copy(io.MultiWriter(f, h), src); err != nil {
-		os.Remove(dest)
 		return "", nil, err
+	}
+	// Flush and close before rename
+	if err := f.Close(); err != nil {
+		return "", nil, fmt.Errorf("flush download: %w", err)
+	}
+	if err := os.Rename(tmpDest, dest); err != nil {
+		return "", nil, fmt.Errorf("finalize download: %w", err)
 	}
 	shaStr := hex.EncodeToString(h.Sum(nil))
 	return dest, &shaStr, nil
@@ -509,6 +558,28 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 	_ = os.WriteFile(filepath.Join(vmDir, "tap_name"), []byte(net.TapName), 0644)
 
 	m.registerVM(&VMInfo{VMID: vmID, Namespace: net.NamespaceName, IP: vmIP, Status: "running", PID: pid, NetworkBridge: netBridge})
+
+	// Restore port rules from DB (stop cleaned iptables but kept DB rows)
+	if m.db != nil {
+		prRows, prErr := m.db.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", vmID)
+		if prErr == nil {
+			restored := 0
+			for prRows.Next() {
+				var hp, vp int
+				var proto string
+				if prRows.Scan(&hp, &vp, &proto) == nil {
+					n := network.NewVMNetwork(vmID, vmIP, m.logger, netBridge)
+					if n.ExposePort(m.cfg.HostInterface, hp, vp, proto) == nil {
+						restored++
+					}
+				}
+			}
+			prRows.Close()
+			if restored > 0 {
+				log.Info("restored port rules after start", zap.Int("count", restored))
+			}
+		}
+	}
 
 	t = time.Now()
 	sshReady := m.waitForSSH(vmIP, 20*time.Second)

@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -245,18 +247,42 @@ func runNetworkDelete(logger *zap.Logger, database *sql.DB, name string) error {
 }
 
 // findFreeSubnet finds the next available /24 subnet in the 10.201-254.0.0 range.
+// Checks BOTH the network DB table AND existing bridges on the system to avoid
+// conflicts with stale bridges from previous sessions.
 func findFreeSubnet(database *sql.DB) (string, error) {
+	used := make(map[string]bool)
+
+	// Check DB
 	rows, err := database.Query("SELECT subnet FROM network")
 	if err != nil {
 		return "", err
 	}
-	defer rows.Close()
-
-	used := make(map[string]bool)
 	for rows.Next() {
 		var s string
 		if rows.Scan(&s) == nil {
 			used[s] = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("query subnets: %w", err)
+	}
+
+	// Check existing bridges on the system (catches stale bridges not in DB)
+	out, err := exec.Command("ip", "-o", "addr", "show", "type", "bridge").Output()
+	if err == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			// Format: "243: br-db2    inet 10.202.0.1/24 ..."
+			fields := strings.Fields(line)
+			for i, f := range fields {
+				if f == "inet" && i+1 < len(fields) {
+					// Parse CIDR, convert gateway to network form
+					_, ipNet, err := net.ParseCIDR(fields[i+1])
+					if err == nil {
+						used[ipNet.String()] = true
+					}
+				}
+			}
 		}
 	}
 

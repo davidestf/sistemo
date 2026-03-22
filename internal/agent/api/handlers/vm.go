@@ -74,6 +74,11 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 	} else {
 		vmid = uuid.NewString()
 	}
+	// Validate VM ID to prevent path traversal (vm_id is used in filesystem paths)
+	if !isValidSafeID(vmid) {
+		writeError(w, http.StatusBadRequest, "invalid vm_id: must be alphanumeric, hyphens, underscores, or dots")
+		return
+	}
 
 	effectiveVCPUs := ifZero(req.VCPUs, 1)
 	effectiveMemoryMB := ifZero(req.MemoryMB, 512)
@@ -110,8 +115,12 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 		zap.Int("effective_memory_mb", effectiveMemoryMB),
 		zap.Int("storage_mb", req.StorageMB))
 
-	// Derive name from image if not provided
+	// Validate and derive name
 	name := req.Name
+	if name != "" && (len(name) > 128 || !isValidSafeID(name)) {
+		writeError(w, http.StatusBadRequest, "invalid name: must be 1-128 alphanumeric, hyphens, underscores, or dots")
+		return
+	}
 	if name == "" {
 		name = strings.TrimSuffix(filepath.Base(req.Image), ".rootfs.ext4")
 		name = strings.TrimSuffix(name, ".ext4")
@@ -196,16 +205,24 @@ func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	preserveStorage := q.Get("preserve_storage") == "true" || q.Get("preserve_storage") == "1"
 
+	now := time.Now().UTC().Format(time.RFC3339)
+	if h.db != nil {
+		h.db.Exec("UPDATE vm SET status = 'maintenance', maintenance_operation = 'destroying', last_state_change = ? WHERE id = ?", now, vmID)
+	}
+
 	terminated, err := h.mgr.Delete(r.Context(), vmID, preserveStorage)
 	if err != nil {
+		// Mark as error so it doesn't stay stuck in maintenance
+		if h.db != nil {
+			h.db.Exec("UPDATE vm SET status = 'error', maintenance_operation = NULL, error_message = ?, last_state_change = ? WHERE id = ?",
+				err.Error(), now, vmID)
+		}
 		h.logger.Error("delete VM failed", zap.String("vm_id", vmID), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if h.db != nil {
-		h.db.Exec("UPDATE vm SET status = 'destroyed', last_state_change = ? WHERE id = ?",
-			time.Now().UTC().Format(time.RFC3339), vmID)
-		h.db.Exec("DELETE FROM port_rule WHERE vm_id = ?", vmID)
+		h.db.Exec("UPDATE vm SET status = 'destroyed', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
 	}
 	db.LogAction(h.db, "destroy", "vm", vmID, "", "", terminated)
 	if !terminated {
@@ -221,20 +238,33 @@ func (h *VM) Stop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Set maintenance status before operation — if daemon crashes mid-stop,
+	// startup cleanup will catch VMs stuck in maintenance.
+	now := time.Now().UTC().Format(time.RFC3339)
+	if h.db != nil {
+		h.db.Exec("UPDATE vm SET status = 'maintenance', maintenance_operation = 'stopping', last_state_change = ? WHERE id = ?", now, vmID)
+	}
+
 	stopped, err := h.mgr.Stop(r.Context(), vmID)
 	if err != nil {
+		// Restore to running on failure
+		if h.db != nil {
+			h.db.Exec("UPDATE vm SET status = 'running', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
+		}
 		h.logger.Error("stop VM failed", zap.String("vm_id", vmID), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if stopped && h.db != nil {
-		h.db.Exec("UPDATE vm SET status = 'stopped', last_state_change = ? WHERE id = ?",
-			time.Now().UTC().Format(time.RFC3339), vmID)
-		// Port rule DB rows are kept so restorePortRules can re-apply them on start.
-		// The iptables rules were already removed by stopVM.
+		h.db.Exec("UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
 	}
 	db.LogAction(h.db, "stop", "vm", vmID, "", "", stopped)
 	if !stopped {
+		// No process found — rollback from maintenance. The VM may already be stopped
+		// or the process died before we could kill it. Either way, mark as stopped.
+		if h.db != nil {
+			h.db.Exec("UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
+		}
 		writeJSON(w, http.StatusNotFound, map[string]interface{}{"vm_id": vmID, "stopped": false})
 		return
 	}
@@ -246,15 +276,24 @@ func (h *VM) Start(w http.ResponseWriter, r *http.Request) {
 	if vmID == "" {
 		return
 	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	if h.db != nil {
+		h.db.Exec("UPDATE vm SET status = 'maintenance', maintenance_operation = 'starting', last_state_change = ? WHERE id = ?", now, vmID)
+	}
+
 	result, err := h.mgr.Start(r.Context(), vmID)
 	if err != nil {
+		if h.db != nil {
+			h.db.Exec("UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
+		}
 		h.logger.Error("start VM failed", zap.String("vm_id", vmID), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if h.db != nil {
-		h.db.Exec("UPDATE vm SET status = 'running', ip_address = ?, namespace = ?, last_state_change = ? WHERE id = ?",
-			result.IPAddress, result.Namespace, time.Now().UTC().Format(time.RFC3339), vmID)
+		h.db.Exec("UPDATE vm SET status = 'running', maintenance_operation = NULL, ip_address = ?, namespace = ?, last_state_change = ? WHERE id = ?",
+			result.IPAddress, result.Namespace, now, vmID)
 	}
 	db.LogAction(h.db, "start", "vm", vmID, "", "", true)
 	writeJSON(w, http.StatusOK, result)
@@ -434,13 +473,13 @@ func (h *VM) Unexpose(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Try to remove iptables rules. If VM is stopped (not in memory), this may fail
+	// but we still delete the DB row — iptables rules were already removed by stop.
 	if err := h.mgr.UnexposePort(vmID, hostPort, vmPort, protocol); err != nil {
-		h.logger.Error("unexpose port failed", zap.String("vm_id", vmID), zap.Error(err))
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+		h.logger.Warn("unexpose port iptables cleanup failed (VM may be stopped)", zap.String("vm_id", vmID), zap.Error(err))
 	}
 
-	// Remove from DB
+	// Always remove from DB — even if iptables cleanup failed (VM stopped, rules already gone)
 	if h.db != nil {
 		h.db.Exec(`DELETE FROM port_rule WHERE vm_id = ? AND host_port = ?`, vmID, hostPort)
 	}

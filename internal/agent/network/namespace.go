@@ -229,8 +229,7 @@ func (n *VMNetwork) Cleanup(_ string) error {
 }
 
 // ExposePort adds DNAT rules to forward hostPort on the host to vmPort on this VM.
-// Since each VM has a unique IP on the bridge subnet, this is a simple DNAT — no
-// fwmark or policy routing needed.
+// Idempotent: if the rules already exist (e.g. after daemon restart), they are not duplicated.
 func (n *VMNetwork) ExposePort(_ string, hostPort, vmPort int, protocol string) error {
 	if hostPort < 1 || hostPort > 65535 || vmPort < 1 || vmPort > 65535 {
 		return fmt.Errorf("port numbers must be 1-65535")
@@ -242,32 +241,28 @@ func (n *VMNetwork) ExposePort(_ string, hostPort, vmPort int, protocol string) 
 	vp := fmt.Sprintf("%d", vmPort)
 	dest := fmt.Sprintf("%s:%d", n.VMIP, vmPort)
 
-	// DNAT: external traffic (any interface except the bridge itself)
-	if rc, out, _ := run("iptables", "-t", "nat", "-A", "PREROUTING",
-		"!", "-i", n.HostBridge, "-p", protocol, "--dport", hp,
-		"-j", "DNAT", "--to-destination", dest); rc != 0 {
-		return fmt.Errorf("PREROUTING DNAT failed: %s", out)
+	// DNAT: external traffic — check first, add only if missing.
+	prArgs := []string{"-t", "nat", "!", "-i", n.HostBridge, "-p", protocol, "--dport", hp, "-j", "DNAT", "--to-destination", dest}
+	if rc, _, _ := run("iptables", append([]string{"-t", "nat", "-C", "PREROUTING"}, prArgs[2:]...)...); rc != 0 {
+		if rc, out, _ := run("iptables", append([]string{"-t", "nat", "-A", "PREROUTING"}, prArgs[2:]...)...); rc != 0 {
+			return fmt.Errorf("PREROUTING DNAT failed: %s", out)
+		}
 	}
-	// DNAT: localhost traffic (curl localhost:80 from host)
-	if rc, out, _ := run("iptables", "-t", "nat", "-A", "OUTPUT",
-		"-p", protocol, "--dport", hp, "-d", "127.0.0.1",
-		"-j", "DNAT", "--to-destination", dest); rc != 0 {
-		run("iptables", "-t", "nat", "-D", "PREROUTING",
-			"!", "-i", n.HostBridge, "-p", protocol, "--dport", hp,
-			"-j", "DNAT", "--to-destination", dest)
-		return fmt.Errorf("OUTPUT DNAT failed: %s", out)
+
+	// DNAT: localhost traffic — check first, add only if missing.
+	outArgs := []string{"-p", protocol, "--dport", hp, "-d", "127.0.0.1", "-j", "DNAT", "--to-destination", dest}
+	if rc, _, _ := run("iptables", append([]string{"-t", "nat", "-C", "OUTPUT"}, outArgs...)...); rc != 0 {
+		if rc, out, _ := run("iptables", append([]string{"-t", "nat", "-A", "OUTPUT"}, outArgs...)...); rc != 0 {
+			return fmt.Errorf("OUTPUT DNAT failed: %s", out)
+		}
 	}
-	// FORWARD: allow traffic to this VM (scoped by destination IP)
-	if rc, out, _ := run("iptables", "-I", "FORWARD", "1",
-		"-d", n.VMIP, "-p", protocol, "--dport", vp,
-		"-j", "ACCEPT"); rc != 0 {
-		run("iptables", "-t", "nat", "-D", "PREROUTING",
-			"!", "-i", n.HostBridge, "-p", protocol, "--dport", hp,
-			"-j", "DNAT", "--to-destination", dest)
-		run("iptables", "-t", "nat", "-D", "OUTPUT",
-			"-p", protocol, "--dport", hp, "-d", "127.0.0.1",
-			"-j", "DNAT", "--to-destination", dest)
-		return fmt.Errorf("FORWARD rule failed: %s", out)
+
+	// FORWARD: allow traffic to this VM — check first, add only if missing.
+	fwdArgs := []string{"-d", n.VMIP, "-p", protocol, "--dport", vp, "-j", "ACCEPT"}
+	if rc, _, _ := run("iptables", append([]string{"-C", "FORWARD"}, fwdArgs...)...); rc != 0 {
+		if rc, out, _ := run("iptables", append([]string{"-I", "FORWARD", "1"}, fwdArgs...)...); rc != 0 {
+			return fmt.Errorf("FORWARD rule failed: %s", out)
+		}
 	}
 	return nil
 }

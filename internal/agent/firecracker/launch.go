@@ -54,6 +54,11 @@ func LaunchInNamespace(vmBaseDir string, vmID string, firecrackerBin string, cfg
 	var cmd *exec.Cmd
 	if useCgroup {
 		unitName := fmt.Sprintf("fc-%s", vmID)
+		// Clear any stale systemd scope from a previous run (stop/start cycle).
+		// Without this, systemd-run fails with "Unit was already loaded".
+		exec.Command("systemctl", "reset-failed", unitName+".scope").Run()
+		exec.Command("systemctl", "stop", unitName+".scope").Run()
+
 		systemdArgs := []string{
 			"--scope",
 			"--unit=" + unitName,
