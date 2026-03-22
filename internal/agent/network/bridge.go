@@ -56,11 +56,7 @@ func ParseBridgeSubnet(cidr string) error {
 
 // EnsureBridge creates the sistemo0 bridge if it doesn't exist, assigns an IP,
 // and sets up NAT for outbound internet access from VMs.
-func EnsureBridge(hostInterface string, logger *zap.Logger) error {
-	if hostInterface == "" {
-		hostInterface = "eth0"
-	}
-
+func EnsureBridge(_ string, logger *zap.Logger) error {
 	// Create bridge if not exists
 	if rc, _, _ := run("ip", "link", "show", BridgeName); rc != 0 {
 		if rc, out, _ := run("ip", "link", "add", BridgeName, "type", "bridge"); rc != 0 {

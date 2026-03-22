@@ -373,7 +373,7 @@ func downloadFromURL(rawurl, dest string) (string, *string, error) {
 	const maxDownloadSize = 50 * 1024 * 1024 * 1024 // 50 GB
 	body := io.LimitReader(resp.Body, maxDownloadSize)
 
-	var src io.Reader = body
+	var src io.Reader
 	// If response is gzip (by header or magic), decompress so we write a valid ext4 image for mount/inject.
 	if resp.Header.Get("Content-Encoding") == "gzip" {
 		zr, err := gzip.NewReader(body)

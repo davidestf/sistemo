@@ -1150,7 +1150,7 @@ func downloadImageToFile(url, dest string) error {
 		return err
 	}
 	defer f.Close()
-	var src io.Reader = resp.Body
+	var src io.Reader
 	if resp.Header.Get("Content-Encoding") == "gzip" {
 		zr, err := gzip.NewReader(resp.Body)
 		if err != nil {
