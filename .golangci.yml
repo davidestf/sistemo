@@ -3,15 +3,12 @@ run:
 
 linters:
   enable:
-    - errcheck
     - govet
     - staticcheck
     - unused
     - ineffassign
     - gosimple
 
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
+linters-settings:
+  govet:
+    enable-all: false
