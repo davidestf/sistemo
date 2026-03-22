@@ -311,6 +311,10 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 
 func (h *Terminal) CreateSession(w http.ResponseWriter, r *http.Request) {
 	vmID := chi.URLParam(r, "vmID")
+	if vmID == "" || !isValidSafeID(vmID) {
+		writeError(w, http.StatusBadRequest, "invalid VM id")
+		return
+	}
 	host := r.Host
 	if host == "" {
 		host = fmt.Sprintf("localhost:%d", h.cfg.Port)

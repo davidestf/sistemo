@@ -355,8 +355,9 @@ func downloadFromURL(rawurl, dest string) (string, *string, error) {
 		return "", nil, errors.New(resp.Status)
 	}
 
-	// Write to temp file, rename on success (prevents corrupt cache from partial downloads)
-	tmpDest := dest + ".downloading"
+	// Write to temp file, rename on success (prevents corrupt cache from partial downloads).
+	// Use random suffix to avoid races between concurrent downloads of the same URL.
+	tmpDest := fmt.Sprintf("%s.downloading.%d", dest, time.Now().UnixNano())
 	f, err := os.Create(tmpDest)
 	if err != nil {
 		return "", nil, err
@@ -367,7 +368,8 @@ func downloadFromURL(rawurl, dest string) (string, *string, error) {
 	}()
 	h := sha256.New()
 
-	// Limit download to 50GB to prevent disk exhaustion from malicious URLs
+	// Limit download size to prevent disk exhaustion.
+	// Apply limit to BOTH compressed body AND decompressed output (gzip bomb protection).
 	const maxDownloadSize = 50 * 1024 * 1024 * 1024 // 50 GB
 	body := io.LimitReader(resp.Body, maxDownloadSize)
 
@@ -379,7 +381,7 @@ func downloadFromURL(rawurl, dest string) (string, *string, error) {
 			return "", nil, fmt.Errorf("gzip reader: %w", err)
 		}
 		defer zr.Close()
-		src = zr
+		src = io.LimitReader(zr, maxDownloadSize) // limit decompressed size too
 	} else {
 		peek := make([]byte, 2)
 		n, _ := io.ReadFull(body, peek)
@@ -389,7 +391,7 @@ func downloadFromURL(rawurl, dest string) (string, *string, error) {
 				return "", nil, fmt.Errorf("gzip reader: %w", err)
 			}
 			defer zr.Close()
-			src = zr
+			src = io.LimitReader(zr, maxDownloadSize) // limit decompressed size too
 		} else {
 			src = io.MultiReader(bytes.NewReader(peek[:n]), body)
 		}

@@ -43,6 +43,7 @@ func NewManager(cfg *config.Config, logger *zap.Logger, db *sql.DB) *Manager {
 	if err := network.EnsureBridge(cfg.HostInterface, logger); err != nil {
 		logger.Fatal("failed to create bridge — VM networking will not work", zap.Error(err))
 	}
+	m.recreateNamedBridges()
 	m.cleanupStaleBridges()
 	m.rehydrateFromDisk()
 	m.cleanupDeadRunningVMs()
@@ -97,7 +98,8 @@ func (m *Manager) reconcile() {
 
 			m.logger.Warn("reconciler: VM process dead, cleaning up",
 				zap.String("vm_id", vmID), zap.Int("pid", info.PID))
-			// Clean up port expose iptables rules before removing network
+			// Clean iptables rules (they'll be re-applied on start)
+			// but keep port_rule DB rows and IP allocation for restart.
 			if m.db != nil && info.IP != "" {
 				rows, err := m.db.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", vmID)
 				if err == nil {
@@ -115,19 +117,19 @@ func (m *Manager) reconcile() {
 						net := network.NewVMNetwork(vmID, info.IP, m.logger, info.NetworkBridge)
 						net.CleanupPortRules(m.cfg.HostInterface, rules)
 					}
-					m.db.Exec("DELETE FROM port_rule WHERE vm_id = ?", vmID)
+					// Do NOT delete port_rule rows — preserved for restart
 				}
 			}
 			if info.Namespace != "" {
 				ns := &network.VMNetwork{NamespaceName: info.Namespace, Logger: m.logger}
 				ns.Cleanup(m.cfg.HostInterface)
 			}
-			// Update DB status and release IP so resources don't leak.
+			// Set to stopped (not error) — VM is restartable with same IP and ports.
+			// Do NOT release IP — preserved for restart.
 			if m.db != nil {
-				m.db.Exec("UPDATE vm SET status = 'error', maintenance_operation = 'process_died', last_state_change = ? WHERE id = ?",
+				m.db.Exec("UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?",
 					time.Now().UTC().Format(time.RFC3339), vmID)
 			}
-			network.ReleaseIP(m.db, vmID)
 			m.unregisterVM(vmID)
 			lock.Unlock()
 		}
@@ -194,6 +196,31 @@ func (m *Manager) rehydrateFromDisk() {
 	}
 }
 
+// recreateNamedBridges ensures all named bridges from the network DB table exist on the system.
+// Named bridges are kernel state and don't survive reboots. This recreates them on daemon startup
+// so VMs on named networks can start after a reboot.
+func (m *Manager) recreateNamedBridges() {
+	if m.db == nil {
+		return
+	}
+	rows, err := m.db.Query("SELECT name, subnet, bridge_name FROM network")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name, subnet, bridgeName string
+		if rows.Scan(&name, &subnet, &bridgeName) != nil {
+			continue
+		}
+		if err := network.CreateNamedBridge(bridgeName, subnet, m.logger); err != nil {
+			m.logger.Error("failed to recreate named bridge", zap.String("bridge", bridgeName), zap.String("subnet", subnet), zap.Error(err))
+		} else {
+			m.logger.Info("recreated named bridge on startup", zap.String("bridge", bridgeName), zap.String("subnet", subnet))
+		}
+	}
+}
+
 // cleanupStaleBridges removes br-* bridges that exist on the system but are NOT in the
 // network DB table. This handles bridges left behind from previous sessions (daemon crash,
 // DB reset, etc.) that would otherwise cause subnet conflicts on network create.
@@ -226,7 +253,9 @@ func (m *Manager) cleanupStaleBridges() {
 }
 
 // cleanupDeadRunningVMs finds DB rows with status='running' that were NOT rehydrated
-// (their process died while daemon was down). Marks them as error and releases resources.
+// (their process died while daemon was down or system rebooted).
+// Sets them to 'stopped' — preserving IP and port rules so the user can restart them
+// and get the same configuration back. This matches the behavior of `sistemo vm stop`.
 func (m *Manager) cleanupDeadRunningVMs() {
 	if m.db == nil {
 		return
@@ -250,11 +279,11 @@ func (m *Manager) cleanupDeadRunningVMs() {
 		}
 	}
 	for _, id := range deadIDs {
-		m.db.Exec("UPDATE vm SET status = 'error', maintenance_operation = 'process_died', last_state_change = ? WHERE id = ?",
+		// Set to 'stopped' (not 'error') — VM is restartable with same IP and ports.
+		// Do NOT delete port_rules or release IP — preserve them for restart.
+		m.db.Exec("UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?",
 			time.Now().UTC().Format(time.RFC3339), id)
-		m.db.Exec("DELETE FROM port_rule WHERE vm_id = ?", id)
-		network.ReleaseIP(m.db, id)
-		m.logger.Info("cleaned up dead running VM from previous run", zap.String("vm_id", id))
+		m.logger.Info("marked dead running VM as stopped (restartable)", zap.String("vm_id", id))
 	}
 }
 

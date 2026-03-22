@@ -212,7 +212,7 @@ func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
 
 	terminated, err := h.mgr.Delete(r.Context(), vmID, preserveStorage)
 	if err != nil {
-		// Mark as error so it doesn't stay stuck in maintenance
+		// Mark as error — needs user attention. User can retry destroy or inspect.
 		if h.db != nil {
 			h.db.Exec("UPDATE vm SET status = 'error', maintenance_operation = NULL, error_message = ?, last_state_change = ? WHERE id = ?",
 				err.Error(), now, vmID)

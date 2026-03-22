@@ -90,6 +90,16 @@ func (h *Network) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if any VMs are using this network
+	if h.db != nil {
+		var vmCount int
+		h.db.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = (SELECT id FROM network WHERE name = ?) AND status NOT IN ('destroyed')", name).Scan(&vmCount)
+		if vmCount > 0 {
+			writeError(w, http.StatusConflict, fmt.Sprintf("network %q has %d active VM(s) — destroy or move them first", name, vmCount))
+			return
+		}
+	}
+
 	// Look up bridge_name from DB; fall back to derivation for backwards compat.
 	var bridgeName string
 	if h.db != nil {
