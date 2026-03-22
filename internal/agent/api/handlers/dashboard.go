@@ -28,7 +28,7 @@ func (h *Dashboard) Dashboard(w http.ResponseWriter, r *http.Request) {
 		rows, err = h.db.Query(`
 			SELECT id, name, status, image, ip_address
 			FROM vm
-			WHERE status != 'destroyed'
+			WHERE status != 'deleted'
 			ORDER BY last_state_change DESC
 		`)
 		if err != nil {

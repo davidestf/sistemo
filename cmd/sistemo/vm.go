@@ -11,7 +11,7 @@ import (
 func vmCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "vm",
-		Short: "Manage VMs (list, deploy, start, stop, destroy, terminal, status, logs, exec)",
+		Short: "Manage VMs (list, deploy, start, stop, delete, terminal, status, logs, exec)",
 	}
 	cmd.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
 		// Root's PersistentPreRunE already ran; get dataDir from root's context (child may not inherit context yet)
@@ -40,7 +40,7 @@ func vmCmd() *cobra.Command {
 	}
 	cmd.AddCommand(vmListCmd())
 	cmd.AddCommand(vmDeployCmd())
-	cmd.AddCommand(vmDestroyCmd())
+	cmd.AddCommand(vmDeleteCmd())
 	cmd.AddCommand(vmStopCmd())
 	cmd.AddCommand(vmStartCmd())
 	cmd.AddCommand(vmRestartCmd())
@@ -138,14 +138,14 @@ Examples:
 	return cmd
 }
 
-func vmDestroyCmd() *cobra.Command {
+func vmDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:               "destroy <name|id>",
-		Short:             "Destroy a VM (removes disk)",
+		Use:               "delete <name|id>",
+		Short:             "Delete a VM (removes disk)",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: vmNameCompletionFunc,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDestroy(getLogger(cmd), getDBFromCmd(cmd), args[0])
+			return runDelete(getLogger(cmd), getDBFromCmd(cmd), args[0])
 		},
 	}
 	return cmd

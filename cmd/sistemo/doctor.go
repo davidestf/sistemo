@@ -232,7 +232,7 @@ func checkDatabase(dataDir string) checkResult {
 	defer db.Close()
 
 	var vmCount, portCount int
-	db.QueryRow("SELECT COUNT(*) FROM vm WHERE status NOT IN ('destroyed')").Scan(&vmCount)
+	db.QueryRow("SELECT COUNT(*) FROM vm WHERE status NOT IN ('deleted')").Scan(&vmCount)
 	db.QueryRow("SELECT COUNT(*) FROM port_rule").Scan(&portCount)
 
 	// Check WAL mode

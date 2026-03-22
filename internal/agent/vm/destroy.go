@@ -159,7 +159,7 @@ func findAndKillVM(vmInfo *VMInfo, vmID, vmDir string, logger *zap.Logger) bool 
 }
 
 // cleanupPortRulesIPTables removes iptables DNAT rules for a VM's exposed ports.
-// If deleteRows is true, also deletes port_rule DB rows (destroy). If false, keeps them (stop).
+// If deleteRows is true, also deletes port_rule DB rows (delete). If false, keeps them (stop).
 func cleanupPortRulesIPTables(m *Manager, vmID, vmIP, bridge string, deleteRows bool) {
 	if m.db == nil || vmIP == "" {
 		return

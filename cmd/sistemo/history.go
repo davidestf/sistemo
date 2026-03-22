@@ -17,7 +17,7 @@ func historyCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "history",
 		Short: "Show operation history",
-		Long: `Show a log of all sistemo operations (VM create, destroy, stop, start, expose, etc).
+		Long: `Show a log of all sistemo operations (VM create, delete, stop, start, expose, etc).
 
 Examples:
   sistemo history                    # last 20 operations
@@ -36,7 +36,7 @@ Examples:
 		},
 	}
 	cmd.Flags().IntVar(&limit, "limit", 20, "number of entries to show")
-	cmd.Flags().StringVar(&action, "action", "", "filter by action (create, destroy, stop, start, expose, unexpose, network.create, network.delete)")
+	cmd.Flags().StringVar(&action, "action", "", "filter by action (create, delete, stop, start, expose, unexpose, network.create, network.delete)")
 	cmd.Flags().StringVar(&target, "target", "", "filter by target name or ID")
 	return cmd
 }

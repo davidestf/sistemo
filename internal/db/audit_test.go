@@ -20,7 +20,7 @@ func TestLogAction(t *testing.T) {
 
 	// Should insert a row
 	LogAction(database, "create", "vm", "vm-123", "myvm", "image=debian vcpus=2", true)
-	LogAction(database, "destroy", "vm", "vm-123", "myvm", "", true)
+	LogAction(database, "delete", "vm", "vm-123", "myvm", "", true)
 	LogAction(database, "create", "vm", "vm-456", "failed", "some error", false)
 
 	var count int

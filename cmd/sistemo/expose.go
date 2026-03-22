@@ -117,5 +117,5 @@ func runUnexpose(logger *zap.Logger, database *sql.DB, nameOrID string, hostPort
 
 // resolveVMID looks up a VM by name or ID and returns its ID.
 func resolveVMID(database *sql.DB, nameOrID string) (string, error) {
-	return lookupVM(database, nameOrID, "destroyed", "error", "failed")
+	return lookupVM(database, nameOrID, "deleted", "error", "failed")
 }

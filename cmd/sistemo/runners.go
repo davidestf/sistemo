@@ -612,7 +612,7 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 	{
 		rows, _ := database.Query(`SELECT pr.vm_id, pr.host_port, pr.vm_port, pr.protocol
 			FROM port_rule pr LEFT JOIN vm v ON pr.vm_id = v.id
-			WHERE v.id IS NULL OR v.status = 'destroyed'`)
+			WHERE v.id IS NULL OR v.status = 'deleted'`)
 		if rows != nil {
 			var staleVMIDs []string
 			cleaned := 0
@@ -649,7 +649,7 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 		}
 	}
 
-	// Clean up stale ip_allocation rows for destroyed or missing VMs.
+	// Clean up stale ip_allocation rows for deleted or missing VMs.
 	// Keep IPs for running, stopped, AND error VMs (all are restartable).
 	db.SafeExec(database, `DELETE FROM ip_allocation WHERE vm_id NOT IN (SELECT id FROM vm WHERE status IN ('running', 'stopped', 'error'))`)
 
@@ -693,7 +693,7 @@ func runList(logger *zap.Logger, database *sql.DB) error {
 	rows, err := database.Query(`
 		SELECT v.id, v.name, v.status, v.image, v.ip_address, COALESCE(n.name, 'default')
 		FROM vm v LEFT JOIN network n ON v.network_id = n.id
-		WHERE v.status != 'destroyed'`)
+		WHERE v.status != 'deleted'`)
 	if err != nil {
 		return fmt.Errorf("query vms: %w", err)
 	}
@@ -891,8 +891,8 @@ func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memory
 	if err != nil {
 		errStr := err.Error()
 		if strings.Contains(errStr, "already exists") {
-			fmt.Fprintf(os.Stderr, "A VM named %q already exists. Use a different name (--name) or destroy the existing one first:\n", name)
-			fmt.Fprintf(os.Stderr, "  sistemo vm destroy %s\n", name)
+			fmt.Fprintf(os.Stderr, "A VM named %q already exists. Use a different name (--name) or delete the existing one first:\n", name)
+			fmt.Fprintf(os.Stderr, "  sistemo vm delete %s\n", name)
 			return fmt.Errorf("VM named %q already exists", name)
 		}
 		if (strings.Contains(errStr, "Permission denied") || strings.Contains(errStr, "Operation not permitted")) &&
@@ -1185,10 +1185,10 @@ func downloadImageToFile(url, dest string) error {
 }
 
 // lookupVM resolves a VM name or ID to its UUID. Returns the VM ID or an error.
-// excludeStatuses lists statuses to exclude from the lookup (e.g. "destroyed", "error", "failed").
+// excludeStatuses lists statuses to exclude from the lookup (e.g. "deleted", "error", "failed").
 func lookupVM(database *sql.DB, nameOrID string, excludeStatuses ...string) (string, error) {
 	if len(excludeStatuses) == 0 {
-		excludeStatuses = []string{"destroyed"}
+		excludeStatuses = []string{"deleted"}
 	}
 	placeholders := make([]string, len(excludeStatuses))
 	args := []interface{}{nameOrID, nameOrID}
@@ -1211,9 +1211,9 @@ func lookupVM(database *sql.DB, nameOrID string, excludeStatuses ...string) (str
 	return vmID, nil
 }
 
-func runDestroy(logger *zap.Logger, database *sql.DB, nameOrID string) error {
+func runDelete(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	baseURL := daemon.URL()
-	vmID, err := lookupVM(database, nameOrID, "destroyed")
+	vmID, err := lookupVM(database, nameOrID, "deleted")
 	if err != nil {
 		return err
 	}
@@ -1226,14 +1226,14 @@ func runDestroy(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 			strings.Contains(err.Error(), "timeout")
 		if daemonUnreachable {
 			// Daemon is down — update DB directly as fallback
-			fmt.Fprintln(os.Stderr, "Warning: daemon unreachable; marking VM as destroyed in database.")
+			fmt.Fprintln(os.Stderr, "Warning: daemon unreachable; marking VM as deleted in database.")
 			now := time.Now().UTC().Format(time.RFC3339)
-			db.SafeExec(database, "UPDATE vm SET status = 'destroyed', last_state_change = ? WHERE id = ?", now, vmID)
+			db.SafeExec(database, "UPDATE vm SET status = 'deleted', last_state_change = ? WHERE id = ?", now, vmID)
 		} else {
-			return fmt.Errorf("destroy VM: %w", err)
+			return fmt.Errorf("delete VM: %w", err)
 		}
 	}
-	fmt.Printf("Destroyed %s\n", vmID)
+	fmt.Printf("Deleted %s\n", vmID)
 	return nil
 }
 
@@ -1242,7 +1242,7 @@ func runStop(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	if err := daemon.Health(baseURL); err != nil {
 		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
 	}
-	vmID, err := lookupVM(database, nameOrID, "destroyed")
+	vmID, err := lookupVM(database, nameOrID, "deleted")
 	if err != nil {
 		return fmt.Errorf("VM not found: %s", nameOrID)
 	}
@@ -1263,7 +1263,7 @@ func runStart(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	if err := daemon.Health(baseURL); err != nil {
 		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
 	}
-	vmID, err := lookupVM(database, nameOrID, "destroyed")
+	vmID, err := lookupVM(database, nameOrID, "deleted")
 	if err != nil {
 		return err
 	}
@@ -1282,7 +1282,7 @@ func runRestart(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	if err := daemon.Health(baseURL); err != nil {
 		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
 	}
-	vmID, err := lookupVM(database, nameOrID, "destroyed")
+	vmID, err := lookupVM(database, nameOrID, "deleted")
 	if err != nil {
 		return err
 	}
@@ -1307,7 +1307,7 @@ func runRestart(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 }
 
 func runTerminal(logger *zap.Logger, database *sql.DB, nameOrID string) error {
-	vmID, err := lookupVM(database, nameOrID, "destroyed", "error", "failed", "stopped", "maintenance")
+	vmID, err := lookupVM(database, nameOrID, "deleted", "error", "failed", "stopped", "maintenance")
 	if err != nil {
 		return fmt.Errorf("VM not found or not running: %s", nameOrID)
 	}
@@ -1336,7 +1336,7 @@ func openBrowser(url string) {
 }
 
 func runStatus(logger *zap.Logger, database *sql.DB, nameOrID string) error {
-	vmID, err := lookupVM(database, nameOrID, "destroyed")
+	vmID, err := lookupVM(database, nameOrID, "deleted")
 	if err != nil {
 		return err
 	}
@@ -1385,7 +1385,7 @@ func runStatus(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 }
 
 func runLogs(logger *zap.Logger, database *sql.DB, nameOrID string) error {
-	vmID, err := lookupVM(database, nameOrID, "destroyed")
+	vmID, err := lookupVM(database, nameOrID, "deleted")
 	if err != nil {
 		return err
 	}
@@ -1404,7 +1404,7 @@ func runLogs(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 }
 
 func runSSH(logger *zap.Logger, database *sql.DB, dataDir, nameOrID string) error {
-	vmID, err := lookupVM(database, nameOrID, "destroyed", "error", "failed", "stopped", "maintenance")
+	vmID, err := lookupVM(database, nameOrID, "deleted", "error", "failed", "stopped", "maintenance")
 	if err != nil {
 		return fmt.Errorf("VM not found or not running: %s", nameOrID)
 	}
@@ -1442,7 +1442,7 @@ func runSSH(logger *zap.Logger, database *sql.DB, dataDir, nameOrID string) erro
 }
 
 func runExec(logger *zap.Logger, database *sql.DB, nameOrID, command string) error {
-	vmID, err := lookupVM(database, nameOrID, "destroyed", "error", "failed", "stopped", "maintenance")
+	vmID, err := lookupVM(database, nameOrID, "deleted", "error", "failed", "stopped", "maintenance")
 	if err != nil {
 		return fmt.Errorf("VM not found or not running: %s", nameOrID)
 	}
