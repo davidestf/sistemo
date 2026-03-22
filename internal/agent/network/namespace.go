@@ -219,7 +219,7 @@ func (n *VMNetwork) Cleanup(_ string) error {
 
 	// Delete namespace (auto-destroys veth-in, ns bridge, TAP, internal iptables)
 	if rc, out, _ := run("ip", "netns", "delete", n.NamespaceName); rc != 0 {
-		// "No such file" is expected when namespace was already cleaned (e.g. stop then destroy)
+		// "No such file" is expected when namespace was already cleaned (e.g. stop then delete)
 		if !strings.Contains(out, "No such file") {
 			log.Warn("failed to delete namespace", zap.String("ns", n.NamespaceName), zap.String("output", out))
 		}

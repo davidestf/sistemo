@@ -139,7 +139,7 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 		)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE constraint failed: vm.name") {
-				writeError(w, http.StatusConflict, fmt.Sprintf("A VM named %q already exists. Use --name or destroy the existing one.", name))
+				writeError(w, http.StatusConflict, fmt.Sprintf("A VM named %q already exists. Use --name or delete the existing one.", name))
 				return
 			}
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("insert vm: %v", err))
@@ -207,12 +207,12 @@ func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	if h.db != nil {
-		db.SafeExec(h.db, "UPDATE vm SET status = 'maintenance', maintenance_operation = 'destroying', last_state_change = ? WHERE id = ?", now, vmID)
+		db.SafeExec(h.db, "UPDATE vm SET status = 'maintenance', maintenance_operation = 'deleting', last_state_change = ? WHERE id = ?", now, vmID)
 	}
 
 	_, err := h.mgr.Delete(r.Context(), vmID, preserveStorage)
 	if err != nil {
-		// Mark as error — needs user attention. User can retry destroy or inspect.
+		// Mark as error — needs user attention. User can retry delete or inspect.
 		if h.db != nil {
 			db.SafeExec(h.db, "UPDATE vm SET status = 'error', maintenance_operation = NULL, error_message = ?, last_state_change = ? WHERE id = ?",
 				err.Error(), now, vmID)
@@ -222,9 +222,9 @@ func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.db != nil {
-		db.SafeExec(h.db, "UPDATE vm SET status = 'destroyed', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
+		db.SafeExec(h.db, "UPDATE vm SET status = 'deleted', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
 	}
-	db.LogAction(h.db, "destroy", "vm", vmID, "", "", true)
+	db.LogAction(h.db, "delete", "vm", vmID, "", "", true)
 	writeJSON(w, http.StatusOK, vm.DeleteResponse{VMID: vmID, Terminated: true})
 }
 

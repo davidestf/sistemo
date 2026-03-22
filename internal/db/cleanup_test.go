@@ -36,14 +36,14 @@ func TestStaleIPAllocationCleanup(t *testing.T) {
 	db.Exec("INSERT INTO vm (id, name, status) VALUES ('vm-running', 'r', 'running')")
 	db.Exec("INSERT INTO vm (id, name, status) VALUES ('vm-stopped', 's', 'stopped')")
 	db.Exec("INSERT INTO vm (id, name, status) VALUES ('vm-error', 'e', 'error')")
-	db.Exec("INSERT INTO vm (id, name, status) VALUES ('vm-destroyed', 'd', 'destroyed')")
+	db.Exec("INSERT INTO vm (id, name, status) VALUES ('vm-deleted', 'd', 'deleted')")
 	db.Exec("INSERT INTO vm (id, name, status) VALUES ('vm-maintenance', 'm', 'maintenance')")
 
 	// Insert IPs for all
 	db.Exec("INSERT INTO ip_allocation (ip, vm_id, allocated_at) VALUES ('10.0.0.1', 'vm-running', 'now')")
 	db.Exec("INSERT INTO ip_allocation (ip, vm_id, allocated_at) VALUES ('10.0.0.2', 'vm-stopped', 'now')")
 	db.Exec("INSERT INTO ip_allocation (ip, vm_id, allocated_at) VALUES ('10.0.0.3', 'vm-error', 'now')")
-	db.Exec("INSERT INTO ip_allocation (ip, vm_id, allocated_at) VALUES ('10.0.0.4', 'vm-destroyed', 'now')")
+	db.Exec("INSERT INTO ip_allocation (ip, vm_id, allocated_at) VALUES ('10.0.0.4', 'vm-deleted', 'now')")
 	db.Exec("INSERT INTO ip_allocation (ip, vm_id, allocated_at) VALUES ('10.0.0.5', 'vm-maintenance', 'now')")
 	db.Exec("INSERT INTO ip_allocation (ip, vm_id, allocated_at) VALUES ('10.0.0.6', 'vm-orphan', 'now')") // no vm row
 
@@ -71,9 +71,9 @@ func TestStaleIPAllocationCleanup(t *testing.T) {
 		t.Error("error VM IP should be preserved")
 	}
 
-	// destroyed, maintenance, orphan should be deleted
-	if remaining["vm-destroyed"] {
-		t.Error("destroyed VM IP should be deleted")
+	// deleted, maintenance, orphan should be deleted
+	if remaining["vm-deleted"] {
+		t.Error("deleted VM IP should be deleted")
 	}
 	if remaining["vm-maintenance"] {
 		t.Error("maintenance VM IP should be deleted")
@@ -87,14 +87,14 @@ func TestStalePortRuleCleanup(t *testing.T) {
 	db := setupCleanupDB(t)
 
 	db.Exec("INSERT INTO vm (id, name, status) VALUES ('vm-alive', 'alive', 'running')")
-	db.Exec("INSERT INTO vm (id, name, status) VALUES ('vm-dead', 'dead', 'destroyed')")
+	db.Exec("INSERT INTO vm (id, name, status) VALUES ('vm-dead', 'dead', 'deleted')")
 
 	db.Exec("INSERT INTO port_rule (id, vm_id, host_port, vm_port, protocol) VALUES ('r1', 'vm-alive', 8080, 80, 'tcp')")
 	db.Exec("INSERT INTO port_rule (id, vm_id, host_port, vm_port, protocol) VALUES ('r2', 'vm-dead', 9090, 80, 'tcp')")
 	db.Exec("INSERT INTO port_rule (id, vm_id, host_port, vm_port, protocol) VALUES ('r3', 'vm-orphan', 7070, 80, 'tcp')") // no vm row
 
 	// Run the cleanup SQL (same as runners.go Phase 2 — simplified)
-	rows, _ := db.Query(`SELECT pr.vm_id FROM port_rule pr LEFT JOIN vm v ON pr.vm_id = v.id WHERE v.id IS NULL OR v.status = 'destroyed'`)
+	rows, _ := db.Query(`SELECT pr.vm_id FROM port_rule pr LEFT JOIN vm v ON pr.vm_id = v.id WHERE v.id IS NULL OR v.status = 'deleted'`)
 	var staleIDs []string
 	for rows.Next() {
 		var id string

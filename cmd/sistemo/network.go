@@ -200,12 +200,12 @@ func runNetworkList(database *sql.DB) {
 
 	// Count VMs on default network
 	var defaultCount int
-	database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id IS NULL AND status NOT IN ('destroyed')").Scan(&defaultCount)
+	database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id IS NULL AND status NOT IN ('deleted')").Scan(&defaultCount)
 	fmt.Fprintf(tw, "default\t10.200.0.0/16\tsistemo0\t%d\n", defaultCount)
 
 	for _, n := range nets {
 		var vmCount int
-		database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = (SELECT id FROM network WHERE name = ?) AND status NOT IN ('destroyed')", n.name).Scan(&vmCount)
+		database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = (SELECT id FROM network WHERE name = ?) AND status NOT IN ('deleted')", n.name).Scan(&vmCount)
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n", n.name, n.subnet, n.bridge, vmCount)
 	}
 	tw.Flush()
@@ -227,9 +227,9 @@ func runNetworkDelete(logger *zap.Logger, database *sql.DB, name string) error {
 
 	// Check for running VMs
 	var vmCount int
-	database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = ? AND status NOT IN ('destroyed')", id).Scan(&vmCount)
+	database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = ? AND status NOT IN ('deleted')", id).Scan(&vmCount)
 	if vmCount > 0 {
-		return fmt.Errorf("network %q has %d VMs — destroy or move them first", name, vmCount)
+		return fmt.Errorf("network %q has %d VMs — delete or move them first", name, vmCount)
 	}
 
 	// Delete bridge via daemon

@@ -47,6 +47,10 @@ func New(dataDir string) (*sql.DB, error) {
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
 
+	// Save network_id data before migrations (migration 006 rebuilds the vm table
+	// without network_id, which is added dynamically). This is a no-op on fresh DBs.
+	networkMap := saveNetworkIDs(db)
+
 	if err := runMigrations(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrations: %w", err)
@@ -55,7 +59,35 @@ func New(dataDir string) (*sql.DB, error) {
 	// Schema evolution: add columns that can't use IF NOT EXISTS in SQLite ALTER TABLE.
 	addColumnIfMissing(db, "vm", "network_id", "TEXT")
 
+	// Restore network_id data after migration + column re-add.
+	restoreNetworkIDs(db, networkMap)
+
 	return db, nil
+}
+
+// saveNetworkIDs reads vm.network_id before a table rebuild migration.
+// Returns empty map if the column or table doesn't exist.
+func saveNetworkIDs(db *sql.DB) map[string]string {
+	m := map[string]string{}
+	rows, err := db.Query("SELECT id, network_id FROM vm WHERE network_id IS NOT NULL AND network_id != ''")
+	if err != nil {
+		return m
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, netID string
+		if rows.Scan(&id, &netID) == nil {
+			m[id] = netID
+		}
+	}
+	return m
+}
+
+// restoreNetworkIDs writes saved network_id values back after a table rebuild.
+func restoreNetworkIDs(db *sql.DB, m map[string]string) {
+	for id, netID := range m {
+		db.Exec("UPDATE vm SET network_id = ? WHERE id = ?", netID, id)
+	}
 }
 
 // addColumnIfMissing adds a column to a table if it doesn't already exist.

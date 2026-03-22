@@ -12,6 +12,22 @@
 
 ---
 
+**Sistemo** turns your Linux machine into a lightweight VM host. One binary, one command, real VMs — each with its own kernel, systemd, and network stack. No QEMU, no libvirt, no YAML. Deploy a Debian VM in 3 seconds.
+
+## Real VMs, not containers
+
+Each VM has its own kernel, its own systemd, its own network stack. Install packages with `apt`. Run services with `systemctl`. It works exactly like a real server — because it is one.
+
+| | Sistemo | Docker | Proxmox |
+|---|---|---|---|
+| Isolation | Real VM (KVM) | Shared kernel | Real VM (KVM) |
+| Setup | One command | One command | ISO install |
+| Binary | ~15 MB, zero deps | Daemon + runtime | Full OS |
+| Boot | < 10 seconds | Seconds | Minutes |
+| Use case | Dev, homelab, sandboxes | Containers | Production VMs |
+
+## Quick start
+
 ```bash
 curl -sSL https://get.sistemo.io | sh
 sudo sistemo up
@@ -19,7 +35,7 @@ sistemo vm deploy debian
 sistemo vm ssh debian
 ```
 
-That's it. Real Debian VM, real systemd, real package managers, SSH access. Running on your hardware via [Firecracker](https://firecracker-microvm.github.io/) microVMs.
+That's it. Real Debian VM, SSH access, full `apt` + `systemctl`. Running on your hardware via [Firecracker](https://firecracker-microvm.github.io/) microVMs.
 
 ## What you can do
 
@@ -53,34 +69,22 @@ sistemo network create production
 sistemo vm deploy debian --name app --network production --expose 3000
 sistemo vm deploy debian --name postgres --network production
 
-# Persistent storage that survives VM destroy
-sistemo volume create 5120 --name pgdata
+# Persistent storage that survives VM delete
+sistemo volume create 5G --name pgdata
 sistemo vm deploy debian --name db --attach=pgdata
 
 # Diagnose your setup
 sudo sistemo doctor
 ```
 
-## Real VMs, not containers
-
-Each VM has its own kernel, its own systemd, its own network stack. Install packages with `apt`. Run services with `systemctl`. It works exactly like a real server — because it is one.
-
-| | Sistemo | Docker | Proxmox |
-|---|---|---|---|
-| Isolation | Real VM (KVM) | Shared kernel | Real VM (KVM) |
-| Setup | One command | One command | ISO install |
-| Binary | ~15 MB, zero deps | Daemon + runtime | Full OS |
-| Boot | < 15 seconds | Seconds | Minutes |
-| Use case | Dev, homelab, sandboxes | Containers | Production VMs |
-
 ## Features
 
 - **One binary** -- CLI + daemon, ~15 MB, zero dependencies beyond Linux + KVM
-- **SSH + browser terminal** -- `sistemo vm ssh` or open `http://localhost:7777` in your browser
+- **SSH + browser terminal** -- `sistemo vm ssh` or open `http://localhost:7777/dashboard` in your browser
 - **Named networks** -- Isolated VM groups with `--network production`
 - **Port expose** -- `--expose 80` or `--expose 8080:3000`
 - **Custom images** -- Build from any Docker image: `sistemo image build nginx:latest`
-- **Persistent volumes** -- Survive VM destroy, reattach anywhere
+- **Persistent volumes** -- Survive VM delete, reattach anywhere
 - **Systemd service** -- `sistemo service install` survives reboots
 - **Health check** -- `sistemo doctor` diagnoses your entire setup
 - **Audit log** -- `sistemo history` shows every operation
@@ -96,7 +100,7 @@ Each VM has its own kernel, its own systemd, its own network stack. Install pack
 
 Works on bare metal, VPS with nested virtualization, and Raspberry Pi 5.
 
-> Sistemo does not run on macOS or Windows (yet). It needs `/dev/kvm`.
+> Sistemo runs on Linux only. It needs `/dev/kvm`.
 
 ## Install
 
@@ -130,7 +134,7 @@ sistemo vm list                           List VMs
 sistemo vm ssh <name>                     SSH into a VM
 sistemo vm exec <name> <command>          Run a command
 sistemo vm restart|stop|start <name>      Lifecycle
-sistemo vm destroy <name>                 Remove a VM
+sistemo vm delete <name>                  Remove a VM
 sistemo vm status <name>                  Show details
 sistemo vm expose <name> --port P         Expose port at runtime
 sistemo vm unexpose <name> --port P       Remove port expose
@@ -139,7 +143,7 @@ sistemo network create <name>             Create isolated network
 sistemo network list                      List networks
 sistemo network delete <name>             Delete network
 
-sistemo volume create <mb> [--name=N]     Create persistent volume
+sistemo volume create <size> [--name=N]   Create persistent volume
 sistemo image build <docker-image>        Build rootfs from Docker
 sistemo image list                        List available images
 sistemo service install                   Run as systemd service
