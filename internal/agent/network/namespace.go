@@ -310,6 +310,48 @@ func (n *VMNetwork) CleanupPortRules(_ string, rules []PortRule) {
 	}
 }
 
+// FlushDNATRulesForPort removes ALL DNAT rules targeting a specific host port,
+// regardless of destination IP. This handles stale rules from old VMs whose IP
+// changed after reboot or redeployment. Called on daemon startup before restoring
+// port rules to ensure a clean iptables state.
+//
+// Uses iptables -D with line numbers from --line-numbers to delete by rule number
+// (highest first to avoid index shifts).
+func FlushDNATRulesForPort(hostPort int, protocol string) {
+	hp := fmt.Sprintf("%d", hostPort)
+
+	// Flush from PREROUTING and OUTPUT chains
+	for _, chain := range []string{"PREROUTING", "OUTPUT"} {
+		for attempt := 0; attempt < 50; attempt++ {
+			// List rules with line numbers to find matches
+			_, out, _ := run("iptables", "-t", "nat", "-L", chain, "-n", "--line-numbers")
+			found := false
+			for _, line := range strings.Split(out, "\n") {
+				// Match lines containing our port and DNAT
+				if !strings.Contains(line, "dpt:"+hp) || !strings.Contains(line, "DNAT") {
+					continue
+				}
+				// Extract line number (first field)
+				fields := strings.Fields(line)
+				if len(fields) < 2 {
+					continue
+				}
+				lineNum := fields[0]
+				if lineNum == "num" {
+					continue // header row
+				}
+				// Delete by line number
+				run("iptables", "-t", "nat", "-D", chain, lineNum)
+				found = true
+				break // restart scan since line numbers shifted
+			}
+			if !found {
+				break
+			}
+		}
+	}
+}
+
 // GetBootArgs returns the kernel boot args for static IP configuration.
 // The VM configures its eth0 with the unique bridge IP and uses the bridge as gateway.
 func GetBootArgs(vmIP string) string {
