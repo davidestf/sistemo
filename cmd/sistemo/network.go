@@ -168,7 +168,7 @@ func runNetworkCreate(logger *zap.Logger, database *sql.DB, name, subnet string)
 	// Create the bridge via daemon
 	if err := daemon.CreateNetwork(baseURL, name, subnet, bridgeName); err != nil {
 		// Rollback DB
-		database.Exec("DELETE FROM network WHERE id = ?", id)
+		db.SafeExec(database, "DELETE FROM network WHERE id = ?", id)
 		return fmt.Errorf("create bridge: %w", err)
 	}
 
@@ -240,7 +240,7 @@ func runNetworkDelete(logger *zap.Logger, database *sql.DB, name string) error {
 		}
 	}
 
-	database.Exec("DELETE FROM network WHERE id = ?", id)
+	db.SafeExec(database, "DELETE FROM network WHERE id = ?", id)
 	db.LogAction(database, "network.delete", "network", id, name, "", true)
 	fmt.Printf("Deleted network %q\n", name)
 	return nil

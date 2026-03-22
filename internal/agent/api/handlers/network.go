@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/davidestf/sistemo/internal/agent/network"
+	"github.com/davidestf/sistemo/internal/db"
 	"go.uber.org/zap"
 )
 
@@ -65,7 +66,7 @@ func (h *Network) Create(w http.ResponseWriter, r *http.Request) {
 
 	// Persist network record so Delete can look up the bridge_name.
 	if h.db != nil {
-		h.db.Exec(`INSERT INTO network (name, subnet, bridge_name, created_at) VALUES (?, ?, ?, datetime('now'))
+		db.SafeExec(h.db, `INSERT INTO network (name, subnet, bridge_name, created_at) VALUES (?, ?, ?, datetime('now'))
 			ON CONFLICT(name) DO UPDATE SET subnet=excluded.subnet, bridge_name=excluded.bridge_name`,
 			req.Name, req.Subnet, req.BridgeName)
 	}
@@ -123,7 +124,7 @@ func (h *Network) Delete(w http.ResponseWriter, r *http.Request) {
 
 	// Delete network record from DB
 	if h.db != nil {
-		h.db.Exec("DELETE FROM network WHERE name = ?", name)
+		db.SafeExec(h.db, "DELETE FROM network WHERE name = ?", name)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{

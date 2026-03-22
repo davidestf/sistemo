@@ -23,6 +23,24 @@ printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' > /etc/resolv.conf
 # Remove policy-rc.d so services auto-start on apt-get install
 rm -f /usr/sbin/policy-rc.d
 
+# Disable slow/unnecessary services for faster boot.
+# journal-flush is kept so logs persist across VM restarts.
+# e2scrub needs LVM (not available in Firecracker VMs).
+for svc in \
+  systemd-random-seed.service \
+  systemd-timesyncd.service \
+  systemd-update-utmp.service \
+  apt-daily.timer \
+  apt-daily-upgrade.timer \
+  e2scrub_all.timer \
+  e2scrub_reap.service \
+  logrotate.timer \
+  sysstat.service \
+  fstrim.timer \
+  man-db.timer; do
+  [ -d /etc/systemd/system ] && ln -sf /dev/null "/etc/systemd/system/$svc" 2>/dev/null
+done
+
 # Wait for virtio-net device (kernel ip= already configured it, just ensure it's up)
 IP=/usr/sbin/ip
 [ -x "$IP" ] || IP=/sbin/ip

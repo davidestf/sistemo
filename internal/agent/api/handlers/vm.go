@@ -164,9 +164,9 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Clean up immediately — don't leave failed VMs lingering in the DB.
 		if h.db != nil {
-			h.db.Exec(`DELETE FROM ip_allocation WHERE vm_id = ?`, vmid)
-			h.db.Exec(`DELETE FROM port_rule WHERE vm_id = ?`, vmid)
-			h.db.Exec(`DELETE FROM vm WHERE id = ?`, vmid)
+			db.SafeExec(h.db, `DELETE FROM ip_allocation WHERE vm_id = ?`, vmid)
+			db.SafeExec(h.db, `DELETE FROM port_rule WHERE vm_id = ?`, vmid)
+			db.SafeExec(h.db, `DELETE FROM vm WHERE id = ?`, vmid)
 		}
 		vmDir := filepath.Join(h.cfg.VMBaseDir, vmid)
 		os.RemoveAll(vmDir)
@@ -178,7 +178,7 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 
 	// Update DB with running status
 	if h.db != nil {
-		h.db.Exec(
+		db.SafeExec(h.db, 
 			`UPDATE vm SET status = 'running', maintenance_operation = NULL, ip_address = ?, namespace = ?, last_state_change = ? WHERE id = ?`,
 			result.IPAddress, result.Namespace, time.Now().UTC().Format(time.RFC3339), vmid)
 	}
@@ -207,14 +207,14 @@ func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	if h.db != nil {
-		h.db.Exec("UPDATE vm SET status = 'maintenance', maintenance_operation = 'destroying', last_state_change = ? WHERE id = ?", now, vmID)
+		db.SafeExec(h.db, "UPDATE vm SET status = 'maintenance', maintenance_operation = 'destroying', last_state_change = ? WHERE id = ?", now, vmID)
 	}
 
-	terminated, err := h.mgr.Delete(r.Context(), vmID, preserveStorage)
+	_, err := h.mgr.Delete(r.Context(), vmID, preserveStorage)
 	if err != nil {
 		// Mark as error — needs user attention. User can retry destroy or inspect.
 		if h.db != nil {
-			h.db.Exec("UPDATE vm SET status = 'error', maintenance_operation = NULL, error_message = ?, last_state_change = ? WHERE id = ?",
+			db.SafeExec(h.db, "UPDATE vm SET status = 'error', maintenance_operation = NULL, error_message = ?, last_state_change = ? WHERE id = ?",
 				err.Error(), now, vmID)
 		}
 		h.logger.Error("delete VM failed", zap.String("vm_id", vmID), zap.Error(err))
@@ -222,13 +222,9 @@ func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.db != nil {
-		h.db.Exec("UPDATE vm SET status = 'destroyed', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
+		db.SafeExec(h.db, "UPDATE vm SET status = 'destroyed', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
 	}
-	db.LogAction(h.db, "destroy", "vm", vmID, "", "", terminated)
-	if !terminated {
-		writeJSON(w, http.StatusNotFound, vm.DeleteResponse{VMID: vmID, Terminated: false})
-		return
-	}
+	db.LogAction(h.db, "destroy", "vm", vmID, "", "", true)
 	writeJSON(w, http.StatusOK, vm.DeleteResponse{VMID: vmID, Terminated: true})
 }
 
@@ -242,30 +238,30 @@ func (h *VM) Stop(w http.ResponseWriter, r *http.Request) {
 	// startup cleanup will catch VMs stuck in maintenance.
 	now := time.Now().UTC().Format(time.RFC3339)
 	if h.db != nil {
-		h.db.Exec("UPDATE vm SET status = 'maintenance', maintenance_operation = 'stopping', last_state_change = ? WHERE id = ?", now, vmID)
+		db.SafeExec(h.db, "UPDATE vm SET status = 'maintenance', maintenance_operation = 'stopping', last_state_change = ? WHERE id = ?", now, vmID)
 	}
 
 	stopped, err := h.mgr.Stop(r.Context(), vmID)
 	if err != nil {
 		// Restore to running on failure
 		if h.db != nil {
-			h.db.Exec("UPDATE vm SET status = 'running', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
+			db.SafeExec(h.db, "UPDATE vm SET status = 'running', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
 		}
 		h.logger.Error("stop VM failed", zap.String("vm_id", vmID), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if stopped && h.db != nil {
-		h.db.Exec("UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
+		db.SafeExec(h.db, "UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
 	}
 	db.LogAction(h.db, "stop", "vm", vmID, "", "", stopped)
 	if !stopped {
-		// No process found — rollback from maintenance. The VM may already be stopped
-		// or the process died before we could kill it. Either way, mark as stopped.
+		// No process found — VM may already be stopped or process died.
+		// Mark as stopped and return success (idempotent).
 		if h.db != nil {
-			h.db.Exec("UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
+			db.SafeExec(h.db, "UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
 		}
-		writeJSON(w, http.StatusNotFound, map[string]interface{}{"vm_id": vmID, "stopped": false})
+		writeJSON(w, http.StatusOK, map[string]interface{}{"vm_id": vmID, "stopped": true, "already_stopped": true})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"vm_id": vmID, "stopped": true})
@@ -279,20 +275,20 @@ func (h *VM) Start(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	if h.db != nil {
-		h.db.Exec("UPDATE vm SET status = 'maintenance', maintenance_operation = 'starting', last_state_change = ? WHERE id = ?", now, vmID)
+		db.SafeExec(h.db, "UPDATE vm SET status = 'maintenance', maintenance_operation = 'starting', last_state_change = ? WHERE id = ?", now, vmID)
 	}
 
 	result, err := h.mgr.Start(r.Context(), vmID)
 	if err != nil {
 		if h.db != nil {
-			h.db.Exec("UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
+			db.SafeExec(h.db, "UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
 		}
 		h.logger.Error("start VM failed", zap.String("vm_id", vmID), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if h.db != nil {
-		h.db.Exec("UPDATE vm SET status = 'running', maintenance_operation = NULL, ip_address = ?, namespace = ?, last_state_change = ? WHERE id = ?",
+		db.SafeExec(h.db, "UPDATE vm SET status = 'running', maintenance_operation = NULL, ip_address = ?, namespace = ?, last_state_change = ? WHERE id = ?",
 			result.IPAddress, result.Namespace, now, vmID)
 	}
 	db.LogAction(h.db, "start", "vm", vmID, "", "", true)
@@ -425,7 +421,7 @@ func (h *VM) Expose(w http.ResponseWriter, r *http.Request) {
 	// Now apply iptables rules — rollback DB if this fails
 	if err := h.mgr.ExposePort(vmID, req.HostPort, req.VMPort, req.Protocol); err != nil {
 		if h.db != nil {
-			h.db.Exec(`DELETE FROM port_rule WHERE id = ?`, ruleID)
+			db.SafeExec(h.db, `DELETE FROM port_rule WHERE id = ?`, ruleID)
 		}
 		h.logger.Error("expose port failed", zap.String("vm_id", vmID), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -481,7 +477,7 @@ func (h *VM) Unexpose(w http.ResponseWriter, r *http.Request) {
 
 	// Always remove from DB — even if iptables cleanup failed (VM stopped, rules already gone)
 	if h.db != nil {
-		h.db.Exec(`DELETE FROM port_rule WHERE vm_id = ? AND host_port = ?`, vmID, hostPort)
+		db.SafeExec(h.db, `DELETE FROM port_rule WHERE vm_id = ? AND host_port = ?`, vmID, hostPort)
 	}
 
 	db.LogAction(h.db, "unexpose", "vm", vmID, "", fmt.Sprintf("host:%d", hostPort), true)

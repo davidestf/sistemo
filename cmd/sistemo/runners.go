@@ -597,9 +597,9 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 			for _, id := range staleIDs {
 				vmDir := filepath.Join(dataDir, "vms", id)
 				os.RemoveAll(vmDir)
-				database.Exec(`DELETE FROM ip_allocation WHERE vm_id = ?`, id)
-				database.Exec(`DELETE FROM port_rule WHERE vm_id = ?`, id)
-				database.Exec(`DELETE FROM vm WHERE id = ?`, id)
+				db.SafeExec(database, `DELETE FROM ip_allocation WHERE vm_id = ?`, id)
+				db.SafeExec(database, `DELETE FROM port_rule WHERE vm_id = ?`, id)
+				db.SafeExec(database, `DELETE FROM vm WHERE id = ?`, id)
 			}
 			if len(staleIDs) > 0 {
 				logger.Info("cleaned up failed VMs from previous run", zap.Int("count", len(staleIDs)))
@@ -641,7 +641,7 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 			rows.Close()
 			// Delete stale port_rule rows (SQLite doesn't support aliases in DELETE)
 			for _, id := range staleVMIDs {
-				database.Exec(`DELETE FROM port_rule WHERE vm_id = ?`, id)
+				db.SafeExec(database, `DELETE FROM port_rule WHERE vm_id = ?`, id)
 			}
 			if cleaned > 0 {
 				logger.Info("cleaned up stale port rules from previous run", zap.Int("count", cleaned))
@@ -651,7 +651,7 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 
 	// Clean up stale ip_allocation rows for destroyed or missing VMs.
 	// Keep IPs for running, stopped, AND error VMs (all are restartable).
-	database.Exec(`DELETE FROM ip_allocation WHERE vm_id NOT IN (SELECT id FROM vm WHERE status IN ('running', 'stopped', 'error'))`)
+	db.SafeExec(database, `DELETE FROM ip_allocation WHERE vm_id NOT IN (SELECT id FROM vm WHERE status IN ('running', 'stopped', 'error'))`)
 
 	if syscall.Geteuid() != 0 {
 		logger.Warn("daemon running as non-root — VM create will fail (mount/namespace need root). Stop and run: sudo ./sistemo up")
@@ -690,23 +690,26 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 }
 
 func runList(logger *zap.Logger, database *sql.DB) error {
-	rows, err := database.Query("SELECT id, name, status, image, ip_address FROM vm WHERE status != 'destroyed'")
+	rows, err := database.Query(`
+		SELECT v.id, v.name, v.status, v.image, v.ip_address, COALESCE(n.name, 'default')
+		FROM vm v LEFT JOIN network n ON v.network_id = n.id
+		WHERE v.status != 'destroyed'`)
 	if err != nil {
 		return fmt.Errorf("query vms: %w", err)
 	}
 	defer rows.Close()
-	var rowsData []struct{ id, name, status, image, ip string }
+	var rowsData []struct{ id, name, status, image, ip, network string }
 	for rows.Next() {
-		var id, name, status, image, ip sql.NullString
-		if err := rows.Scan(&id, &name, &status, &image, &ip); err != nil {
+		var id, name, status, image, ip, net sql.NullString
+		if err := rows.Scan(&id, &name, &status, &image, &ip, &net); err != nil {
 			return fmt.Errorf("scan: %w", err)
 		}
 		img := image.String
 		if img != "" && len(img) > 40 {
 			img = "..." + filepath.Base(img)
 		}
-		rowsData = append(rowsData, struct{ id, name, status, image, ip string }{
-			id.String, name.String, status.String, img, ip.String,
+		rowsData = append(rowsData, struct{ id, name, status, image, ip, network string }{
+			id.String, name.String, status.String, img, ip.String, net.String,
 		})
 	}
 	if len(rowsData) == 0 {
@@ -714,9 +717,9 @@ func runList(logger *zap.Logger, database *sql.DB) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tIMAGE\tIP")
+	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tIMAGE\tIP\tNETWORK")
 	for _, r := range rowsData {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", r.id, r.name, r.status, r.image, r.ip)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.id, r.name, r.status, r.image, r.ip, r.network)
 	}
 	tw.Flush()
 	return nil
@@ -905,7 +908,7 @@ func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memory
 	}
 	// Store network association
 	if networkID != "" && database != nil {
-		database.Exec("UPDATE vm SET network_id = ? WHERE id = ?", networkID, resp.VMID)
+		db.SafeExec(database, "UPDATE vm SET network_id = ? WHERE id = ?", networkID, resp.VMID)
 	}
 
 	fmt.Printf("Deployed %q as %s (%s)\n", image, name, resp.VMID)
@@ -1214,7 +1217,7 @@ func runDestroy(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	if err != nil {
 		return err
 	}
-	ok, err := daemon.DeleteVM(baseURL, vmID)
+	_, err = daemon.DeleteVM(baseURL, vmID)
 	if err != nil {
 		daemonUnreachable := strings.Contains(err.Error(), "connection refused") ||
 			strings.Contains(err.Error(), "connection reset") ||
@@ -1225,14 +1228,10 @@ func runDestroy(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 			// Daemon is down — update DB directly as fallback
 			fmt.Fprintln(os.Stderr, "Warning: daemon unreachable; marking VM as destroyed in database.")
 			now := time.Now().UTC().Format(time.RFC3339)
-			database.Exec("UPDATE vm SET status = 'destroyed', last_state_change = ? WHERE id = ?", now, vmID)
+			db.SafeExec(database, "UPDATE vm SET status = 'destroyed', last_state_change = ? WHERE id = ?", now, vmID)
 		} else {
 			return fmt.Errorf("destroy VM: %w", err)
 		}
-	}
-	if !ok {
-		fmt.Printf("VM %s not found on daemon (may already be gone). Marked as destroyed.\n", vmID)
-		return nil
 	}
 	fmt.Printf("Destroyed %s\n", vmID)
 	return nil
@@ -1243,9 +1242,9 @@ func runStop(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	if err := daemon.Health(baseURL); err != nil {
 		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
 	}
-	vmID, err := lookupVM(database, nameOrID, "destroyed", "stopped")
+	vmID, err := lookupVM(database, nameOrID, "destroyed")
 	if err != nil {
-		return fmt.Errorf("VM not found or already stopped (list VMs: sistemo vm list): %s", nameOrID)
+		return fmt.Errorf("VM not found: %s", nameOrID)
 	}
 	stopped, err := daemon.StopVM(baseURL, vmID)
 	if err != nil {

@@ -2,6 +2,7 @@ package vm
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	agentmw "github.com/davidestf/sistemo/internal/agent/api/middleware"
 	network "github.com/davidestf/sistemo/internal/agent/network"
+	"github.com/davidestf/sistemo/internal/db"
 	"go.uber.org/zap"
 )
 
@@ -20,7 +22,6 @@ func deleteVM(ctx context.Context, m *Manager, vmID string, preserveStorage bool
 	deleteStart := time.Now()
 	log := agentmw.LoggerFromCtx(ctx, m.logger).With(zap.String("vm_id", vmID))
 	vmDir := filepath.Join(m.cfg.VMBaseDir, vmID)
-	socketPath := filepath.Join(vmDir, "firecracker.socket")
 
 	log.Info("starting deletion")
 
@@ -28,79 +29,12 @@ func deleteVM(ctx context.Context, m *Manager, vmID string, preserveStorage bool
 	vmInfo := m.vms[vmID]
 	m.mu.RUnlock()
 
-	// Clean up port expose iptables rules.
-	// Use in-memory info if available, otherwise look up IP from DB so we don't
-	// orphan iptables rules when the daemon doesn't know about the VM.
-	if m.db != nil {
-		vmIP := ""
-		bridge := ""
-		if vmInfo != nil {
-			vmIP = vmInfo.IP
-			bridge = vmInfo.NetworkBridge
-		} else {
-			vmIP = network.GetAllocatedIP(m.db, vmID)
-			// Try to get bridge from vm_spec.json
-			if specData, err := os.ReadFile(filepath.Join(vmDir, "vm_spec.json")); err == nil {
-				var spec struct {
-					NetworkBridge string `json:"network_bridge"`
-				}
-				if json.Unmarshal(specData, &spec) == nil {
-					bridge = spec.NetworkBridge
-				}
-			}
-		}
-		if vmIP != "" {
-			rows, err := m.db.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", vmID)
-			if err == nil {
-				var rules []network.PortRule
-				for rows.Next() {
-					var r network.PortRule
-					if rows.Scan(&r.HostPort, &r.VMPort, &r.Protocol) == nil {
-						rules = append(rules, r)
-					}
-				}
-				rows.Close()
-				if len(rules) > 0 {
-					net := network.NewVMNetwork(vmID, vmIP, m.logger, bridge)
-					net.CleanupPortRules(m.cfg.HostInterface, rules)
-				}
-			}
-			m.db.Exec("DELETE FROM port_rule WHERE vm_id = ?", vmID)
-		}
-	}
-
-	processKilled := false
+	// Clean up port expose iptables rules + delete DB rows
+	vmIP, bridge := getVMIPAndBridge(vmInfo, m.db, vmID, vmDir)
+	cleanupPortRulesIPTables(m, vmID, vmIP, bridge, true)
 
 	t := time.Now()
-	// Method 1: In-memory VM info
-	if vmInfo != nil && vmInfo.PID > 0 {
-		if killProcessGroup(vmInfo.PID, vmID, m.logger) {
-			processKilled = true
-		}
-	}
-
-	// Method 2: PID file
-	if !processKilled {
-		if data, err := os.ReadFile(filepath.Join(vmDir, "firecracker.pid")); err == nil {
-			if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
-				if killProcessGroup(pid, vmID, m.logger) {
-					processKilled = true
-				}
-			}
-		}
-	}
-
-	// Method 3: Search by socket path
-	if !processKilled {
-		if pids := findProcessesBySocket(socketPath); len(pids) > 0 {
-			for _, pid := range pids {
-				if killProcessGroup(pid, vmID, m.logger) {
-					processKilled = true
-				}
-			}
-		}
-	}
-
+	processKilled := findAndKillVM(vmInfo, vmID, vmDir, m.logger)
 	if !processKilled {
 		log.Warn("could not find any firecracker process to kill")
 	}
@@ -147,74 +81,16 @@ func deleteVM(ctx context.Context, m *Manager, vmID string, preserveStorage bool
 func stopVM(ctx context.Context, m *Manager, vmID string) (bool, error) {
 	log := agentmw.LoggerFromCtx(ctx, m.logger).With(zap.String("vm_id", vmID))
 	vmDir := filepath.Join(m.cfg.VMBaseDir, vmID)
-	socketPath := filepath.Join(vmDir, "firecracker.socket")
 
 	m.mu.RLock()
 	vmInfo := m.vms[vmID]
 	m.mu.RUnlock()
 
-	processKilled := false
-	if vmInfo != nil && vmInfo.PID > 0 {
-		if killProcessGroup(vmInfo.PID, vmID, m.logger) {
-			processKilled = true
-		}
-	}
-	if !processKilled {
-		if data, err := os.ReadFile(filepath.Join(vmDir, "firecracker.pid")); err == nil {
-			if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
-				if killProcessGroup(pid, vmID, m.logger) {
-					processKilled = true
-				}
-			}
-		}
-	}
-	if !processKilled {
-		if pids := findProcessesBySocket(socketPath); len(pids) > 0 {
-			for _, pid := range pids {
-				if killProcessGroup(pid, vmID, m.logger) {
-					processKilled = true
-				}
-			}
-		}
-	}
+	processKilled := findAndKillVM(vmInfo, vmID, vmDir, m.logger)
 
 	// Clean up port expose iptables rules (DB rows kept so they can be re-applied on start)
-	if m.db != nil {
-		vmIP := ""
-		bridge := ""
-		if vmInfo != nil {
-			vmIP = vmInfo.IP
-			bridge = vmInfo.NetworkBridge
-		} else {
-			vmIP = network.GetAllocatedIP(m.db, vmID)
-			// Read bridge from vm_spec.json (same as deleteVM does)
-			if specData, err := os.ReadFile(filepath.Join(vmDir, "vm_spec.json")); err == nil {
-				var spec struct {
-					NetworkBridge string `json:"network_bridge"`
-				}
-				if json.Unmarshal(specData, &spec) == nil {
-					bridge = spec.NetworkBridge
-				}
-			}
-		}
-		if vmIP != "" {
-			rows, err := m.db.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", vmID)
-			if err == nil {
-				var rules []network.PortRule
-				for rows.Next() {
-					var r network.PortRule
-					if rows.Scan(&r.HostPort, &r.VMPort, &r.Protocol) == nil {
-						rules = append(rules, r)
-					}
-				}
-				rows.Close()
-				if len(rules) > 0 {
-					net := network.NewVMNetwork(vmID, vmIP, m.logger, bridge)
-					net.CleanupPortRules(m.cfg.HostInterface, rules)
-				}
-			}
-		}
-	}
+	vmIP, bridge := getVMIPAndBridge(vmInfo, m.db, vmID, vmDir)
+	cleanupPortRulesIPTables(m, vmID, vmIP, bridge, false)
 
 	nsName := ""
 	if vmInfo != nil {
@@ -230,6 +106,83 @@ func stopVM(ctx context.Context, m *Manager, vmID string) (bool, error) {
 	m.unregisterVM(vmID)
 	log.Info("VM stopped (vmDir kept)", zap.Bool("process_killed", processKilled))
 	return processKilled, nil
+}
+
+// getVMIPAndBridge returns the VM's IP and bridge name from in-memory info or DB/disk fallback.
+func getVMIPAndBridge(vmInfo *VMInfo, db *sql.DB, vmID, vmDir string) (string, string) {
+	if vmInfo != nil {
+		return vmInfo.IP, vmInfo.NetworkBridge
+	}
+	vmIP := network.GetAllocatedIP(db, vmID)
+	var bridge string
+	if specData, err := os.ReadFile(filepath.Join(vmDir, "vm_spec.json")); err == nil {
+		var spec struct {
+			NetworkBridge string `json:"network_bridge"`
+		}
+		if json.Unmarshal(specData, &spec) == nil {
+			bridge = spec.NetworkBridge
+		}
+	}
+	return vmIP, bridge
+}
+
+// findAndKillVM tries 3 methods to find and kill the VM process: in-memory PID, PID file, /proc scan.
+func findAndKillVM(vmInfo *VMInfo, vmID, vmDir string, logger *zap.Logger) bool {
+	killed := false
+
+	// Method 1: In-memory VM info
+	if vmInfo != nil && vmInfo.PID > 0 {
+		if killProcessGroup(vmInfo.PID, vmID, logger) {
+			return true
+		}
+	}
+
+	// Method 2: PID file
+	if data, err := os.ReadFile(filepath.Join(vmDir, "firecracker.pid")); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+			if killProcessGroup(pid, vmID, logger) {
+				return true
+			}
+		}
+	}
+
+	// Method 3: Search by socket path
+	socketPath := filepath.Join(vmDir, "firecracker.socket")
+	if pids := findProcessesBySocket(socketPath); len(pids) > 0 {
+		for _, pid := range pids {
+			if killProcessGroup(pid, vmID, logger) {
+				killed = true
+			}
+		}
+	}
+	return killed
+}
+
+// cleanupPortRulesIPTables removes iptables DNAT rules for a VM's exposed ports.
+// If deleteRows is true, also deletes port_rule DB rows (destroy). If false, keeps them (stop).
+func cleanupPortRulesIPTables(m *Manager, vmID, vmIP, bridge string, deleteRows bool) {
+	if m.db == nil || vmIP == "" {
+		return
+	}
+	rows, err := m.db.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", vmID)
+	if err != nil {
+		return
+	}
+	var rules []network.PortRule
+	for rows.Next() {
+		var r network.PortRule
+		if rows.Scan(&r.HostPort, &r.VMPort, &r.Protocol) == nil {
+			rules = append(rules, r)
+		}
+	}
+	rows.Close()
+	if len(rules) > 0 {
+		net := network.NewVMNetwork(vmID, vmIP, m.logger, bridge)
+		net.CleanupPortRules(m.cfg.HostInterface, rules)
+	}
+	if deleteRows {
+		db.SafeExec(m.db, "DELETE FROM port_rule WHERE vm_id = ?", vmID)
+	}
 }
 
 func killProcessGroup(pid int, vmID string, logger *zap.Logger) bool {
