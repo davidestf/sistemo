@@ -219,7 +219,10 @@ func (n *VMNetwork) Cleanup(_ string) error {
 
 	// Delete namespace (auto-destroys veth-in, ns bridge, TAP, internal iptables)
 	if rc, out, _ := run("ip", "netns", "delete", n.NamespaceName); rc != 0 {
-		log.Warn("failed to delete namespace", zap.String("ns", n.NamespaceName), zap.String("output", out))
+		// "No such file" is expected when namespace was already cleaned (e.g. stop then destroy)
+		if !strings.Contains(out, "No such file") {
+			log.Warn("failed to delete namespace", zap.String("ns", n.NamespaceName), zap.String("output", out))
+		}
 	}
 	// Delete host-side veth (may already be gone when namespace was deleted)
 	if vethOut != "" {
@@ -242,25 +245,40 @@ func (n *VMNetwork) ExposePort(_ string, hostPort, vmPort int, protocol string) 
 	dest := fmt.Sprintf("%s:%d", n.VMIP, vmPort)
 
 	// DNAT: external traffic — check first, add only if missing.
-	prArgs := []string{"-t", "nat", "!", "-i", n.HostBridge, "-p", protocol, "--dport", hp, "-j", "DNAT", "--to-destination", dest}
-	if rc, _, _ := run("iptables", append([]string{"-t", "nat", "-C", "PREROUTING"}, prArgs[2:]...)...); rc != 0 {
-		if rc, out, _ := run("iptables", append([]string{"-t", "nat", "-A", "PREROUTING"}, prArgs[2:]...)...); rc != 0 {
+	prArgs := []string{"!", "-i", n.HostBridge, "-p", protocol, "--dport", hp, "-j", "DNAT", "--to-destination", dest}
+	addedPR := false
+	if rc, _, _ := run("iptables", append([]string{"-t", "nat", "-C", "PREROUTING"}, prArgs...)...); rc != 0 {
+		if rc, out, _ := run("iptables", append([]string{"-t", "nat", "-A", "PREROUTING"}, prArgs...)...); rc != 0 {
 			return fmt.Errorf("PREROUTING DNAT failed: %s", out)
 		}
+		addedPR = true
 	}
 
 	// DNAT: localhost traffic — check first, add only if missing.
 	outArgs := []string{"-p", protocol, "--dport", hp, "-d", "127.0.0.1", "-j", "DNAT", "--to-destination", dest}
+	addedOUT := false
 	if rc, _, _ := run("iptables", append([]string{"-t", "nat", "-C", "OUTPUT"}, outArgs...)...); rc != 0 {
 		if rc, out, _ := run("iptables", append([]string{"-t", "nat", "-A", "OUTPUT"}, outArgs...)...); rc != 0 {
+			// Rollback PREROUTING rule if we added it
+			if addedPR {
+				run("iptables", append([]string{"-t", "nat", "-D", "PREROUTING"}, prArgs...)...)
+			}
 			return fmt.Errorf("OUTPUT DNAT failed: %s", out)
 		}
+		addedOUT = true
 	}
 
 	// FORWARD: allow traffic to this VM — check first, add only if missing.
 	fwdArgs := []string{"-d", n.VMIP, "-p", protocol, "--dport", vp, "-j", "ACCEPT"}
 	if rc, _, _ := run("iptables", append([]string{"-C", "FORWARD"}, fwdArgs...)...); rc != 0 {
 		if rc, out, _ := run("iptables", append([]string{"-I", "FORWARD", "1"}, fwdArgs...)...); rc != 0 {
+			// Rollback previously added rules
+			if addedPR {
+				run("iptables", append([]string{"-t", "nat", "-D", "PREROUTING"}, prArgs...)...)
+			}
+			if addedOUT {
+				run("iptables", append([]string{"-t", "nat", "-D", "OUTPUT"}, outArgs...)...)
+			}
 			return fmt.Errorf("FORWARD rule failed: %s", out)
 		}
 	}

@@ -17,6 +17,7 @@ import (
 	agentmw "github.com/davidestf/sistemo/internal/agent/api/middleware"
 	"github.com/davidestf/sistemo/internal/agent/config"
 	"github.com/davidestf/sistemo/internal/agent/network"
+	"github.com/davidestf/sistemo/internal/db"
 	"go.uber.org/zap"
 )
 
@@ -127,7 +128,7 @@ func (m *Manager) reconcile() {
 			// Set to stopped (not error) — VM is restartable with same IP and ports.
 			// Do NOT release IP — preserved for restart.
 			if m.db != nil {
-				m.db.Exec("UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?",
+				db.SafeExec(m.db, "UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?",
 					time.Now().UTC().Format(time.RFC3339), vmID)
 			}
 			m.unregisterVM(vmID)
@@ -281,7 +282,7 @@ func (m *Manager) cleanupDeadRunningVMs() {
 	for _, id := range deadIDs {
 		// Set to 'stopped' (not 'error') — VM is restartable with same IP and ports.
 		// Do NOT delete port_rules or release IP — preserve them for restart.
-		m.db.Exec("UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?",
+		db.SafeExec(m.db, "UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?",
 			time.Now().UTC().Format(time.RFC3339), id)
 		m.logger.Info("marked dead running VM as stopped (restartable)", zap.String("vm_id", id))
 	}
@@ -493,7 +494,7 @@ func (m *Manager) waitForSSH(vmIP string, timeout time.Duration) bool {
 	var lastErr error
 	for time.Since(start) < timeout {
 		attempt++
-		conn, err := net.DialTimeout("tcp", vmIP+":22", 500*time.Millisecond)
+		conn, err := net.DialTimeout("tcp", vmIP+":22", 200*time.Millisecond)
 		if err == nil {
 			conn.Close()
 			m.logger.Info("SSH ready",
@@ -503,7 +504,7 @@ func (m *Manager) waitForSSH(vmIP string, timeout time.Duration) bool {
 			return true
 		}
 		lastErr = err
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 	m.logger.Warn("SSH readiness check timed out",
 		zap.String("vm_ip", vmIP),

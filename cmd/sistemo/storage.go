@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"strconv"
 
 	"github.com/spf13/cobra"
 )
@@ -21,14 +20,15 @@ func volumeCmd() *cobra.Command {
 func volumeCreateCmd() *cobra.Command {
 	var name string
 	cmd := &cobra.Command{
-		Use:   "create <size_mb>",
+		Use:   "create <size>",
 		Short: "Create a volume",
+		Long:  "Create a persistent volume. Size can be a number (MB) or e.g. 1G, 5GB, 512MB.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sizeMB, err := strconv.Atoi(args[0])
+			sizeMB, err := parseSizeMB(args[0])
 			if err != nil || sizeMB < 1 {
 				cmd.SilenceUsage = true
-				return fmt.Errorf("volume create: size_mb must be a positive integer")
+				return fmt.Errorf("volume create: invalid size %q (use a number in MB, or e.g. 1G, 5GB)", args[0])
 			}
 			return runStorageCreate(getLogger(cmd), getDataDirFromCmd(cmd), sizeMB, name)
 		},
