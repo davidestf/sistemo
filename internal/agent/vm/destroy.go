@@ -54,12 +54,44 @@ func deleteVM(ctx context.Context, m *Manager, vmID string, preserveStorage bool
 	}
 	log.Info("phase: namespace_cleanup", zap.Duration("elapsed", time.Since(t)))
 
-	if !preserveStorage {
-		// Clean up external rootfs (local copy or symlink) if any
-		if data, err := os.ReadFile(filepath.Join(vmDir, "rootfs_path")); err == nil {
-			rootfsPath := strings.TrimSpace(string(data))
-			if rootfsPath != "" && rootfsPath != filepath.Join(vmDir, "rootfs.ext4") {
-				os.Remove(rootfsPath)
+	// Read root_volume_path from vm_spec.json (if present, VM uses a managed volume)
+	var rootVolumePath string
+	if specData, err := os.ReadFile(filepath.Join(vmDir, "vm_spec.json")); err == nil {
+		var spec struct {
+			RootVolumePath string `json:"root_volume_path"`
+		}
+		if json.Unmarshal(specData, &spec) == nil {
+			rootVolumePath = spec.RootVolumePath
+		}
+	}
+
+	if rootVolumePath != "" {
+		// VM uses a managed root volume
+		if !preserveStorage {
+			if err := os.Remove(rootVolumePath); err != nil && !os.IsNotExist(err) {
+				log.Warn("failed to remove root volume file", zap.String("path", rootVolumePath), zap.Error(err))
+			} else {
+				log.Info("removed root volume file", zap.String("path", rootVolumePath))
+			}
+		}
+		// Always remove vmDir — it only has metadata files, not the rootfs
+		if err := os.RemoveAll(vmDir); err != nil {
+			log.Warn("failed to remove VM directory", zap.String("vm_id", vmID), zap.Error(err))
+		}
+	} else {
+		// Old-style VM: rootfs is inside vmDir
+		if !preserveStorage {
+			// Clean up external rootfs (local copy or symlink) if any
+			if data, err := os.ReadFile(filepath.Join(vmDir, "rootfs_path")); err == nil {
+				rootfsPath := strings.TrimSpace(string(data))
+				if rootfsPath != "" && rootfsPath != filepath.Join(vmDir, "rootfs.ext4") {
+					os.Remove(rootfsPath)
+				}
+			}
+		}
+		if !preserveStorage {
+			if err := os.RemoveAll(vmDir); err != nil {
+				log.Warn("failed to remove VM directory", zap.String("vm_id", vmID), zap.Error(err))
 			}
 		}
 	}
@@ -67,11 +99,6 @@ func deleteVM(ctx context.Context, m *Manager, vmID string, preserveStorage bool
 	m.unregisterVM(vmID)
 	if err := network.ReleaseIP(m.db, vmID); err != nil {
 		log.Warn("failed to release IP", zap.Error(err))
-	}
-	if !preserveStorage {
-		if err := os.RemoveAll(vmDir); err != nil {
-			log.Warn("failed to remove VM directory", zap.String("vm_id", vmID), zap.Error(err))
-		}
 	}
 	log.Info("delete complete", zap.Duration("total", time.Since(deleteStart)), zap.Bool("preserve_storage", preserveStorage))
 	return processKilled, nil

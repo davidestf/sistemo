@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -111,21 +110,17 @@ Examples:
 				return err
 			}
 
-			var attachPaths []string
+			var attachVolumes []string
 			if attach != "" {
 				for _, idOrName := range strings.Split(attach, ",") {
 					idOrName = strings.TrimSpace(idOrName)
 					if idOrName == "" {
 						continue
 					}
-					p := resolveVolumePath(dataDir, idOrName)
-					if p == "" {
-						return fmt.Errorf("volume not found for attach: %q", idOrName)
-					}
-					attachPaths = append(attachPaths, p)
+					attachVolumes = append(attachVolumes, idOrName)
 				}
 			}
-			return runDeploy(getLogger(cmd), getDBFromCmd(cmd), imageArg, vcpus, memoryMB, storageMB, attachPaths, name, expose, networkName)
+			return runDeploy(getLogger(cmd), getDBFromCmd(cmd), imageArg, vcpus, memoryMB, storageMB, attachVolumes, name, expose, networkName)
 		},
 	}
 	cmd.Flags().IntVar(&vcpus, "vcpus", 2, "number of vCPUs")
@@ -139,15 +134,17 @@ Examples:
 }
 
 func vmDeleteCmd() *cobra.Command {
+	var preserveStorage bool
 	cmd := &cobra.Command{
 		Use:               "delete <name|id>",
-		Short:             "Delete a VM (removes disk)",
+		Short:             "Delete a VM (removes disk unless --preserve-storage)",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: vmNameCompletionFunc,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDelete(getLogger(cmd), getDBFromCmd(cmd), args[0])
+			return runDelete(getLogger(cmd), getDBFromCmd(cmd), args[0], preserveStorage)
 		},
 	}
+	cmd.Flags().BoolVar(&preserveStorage, "preserve-storage", false, "Keep the root volume after deleting the VM")
 	return cmd
 }
 

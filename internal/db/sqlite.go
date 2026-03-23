@@ -5,6 +5,7 @@ package db
 import (
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,9 +59,13 @@ func New(dataDir string) (*sql.DB, error) {
 
 	// Schema evolution: add columns that can't use IF NOT EXISTS in SQLite ALTER TABLE.
 	addColumnIfMissing(db, "vm", "network_id", "TEXT")
+	addColumnIfMissing(db, "vm", "root_volume", "TEXT")
 
 	// Restore network_id data after migration + column re-add.
 	restoreNetworkIDs(db, networkMap)
+
+	// Migrate volume index.json to SQLite if present.
+	migrateVolumeIndex(db, dataDir)
 
 	return db, nil
 }
@@ -117,6 +122,59 @@ func addColumnIfMissing(db *sql.DB, table, column, colType string) {
 	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, colType)); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to add column %s.%s: %v\n", table, column, err)
 	}
+}
+
+// migrateVolumeIndex migrates volumes/index.json into the SQLite volume table.
+// This is a one-time migration; index.json is renamed to index.json.migrated on success.
+func migrateVolumeIndex(db *sql.DB, dataDir string) {
+	indexPath := filepath.Join(dataDir, "volumes", "index.json")
+	migratedPath := indexPath + ".migrated"
+
+	// No index.json — nothing to migrate.
+	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
+		return
+	}
+
+	// Already migrated.
+	if _, err := os.Stat(migratedPath); err == nil {
+		return
+	}
+
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to read volume index.json: %v\n", err)
+		return
+	}
+
+	var entries []struct {
+		ID     string `json:"id"`
+		Name   string `json:"name"`
+		Path   string `json:"path"`
+		SizeMB int    `json:"size_mb"`
+	}
+	if err := json.Unmarshal(data, &entries); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to parse volume index.json: %v\n", err)
+		return
+	}
+
+	count := 0
+	for _, e := range entries {
+		if _, err := db.Exec(
+			"INSERT OR IGNORE INTO volume (id, name, size_mb, path) VALUES (?, ?, ?, ?)",
+			e.ID, e.Name, e.SizeMB, e.Path,
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to migrate volume %s: %v\n", e.ID, err)
+			continue
+		}
+		count++
+	}
+
+	if err := os.Rename(indexPath, migratedPath); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to rename index.json to index.json.migrated: %v\n", err)
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "migrated %d volumes from index.json to SQLite\n", count)
 }
 
 func runMigrations(db *sql.DB) error {

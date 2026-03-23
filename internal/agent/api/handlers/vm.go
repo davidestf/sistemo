@@ -146,17 +146,81 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Create root volume record before VM creation
+	now := time.Now().UTC().Format(time.RFC3339)
+	rootVolID := uuid.NewString()
+	rootVolName := name + "-root"
+	volumesDir := filepath.Join(filepath.Dir(h.cfg.VMBaseDir), "volumes")
+	rootVolPath := ""
+	effectiveStorageMB := req.StorageMB
+	if h.db != nil {
+		if err := os.MkdirAll(volumesDir, 0755); err != nil {
+			h.logger.Error("create volumes dir failed", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to create volumes directory")
+			return
+		}
+		rootVolPath = filepath.Join(volumesDir, rootVolID+".ext4")
+		_, err := h.db.Exec(
+			`INSERT INTO volume (id, name, size_mb, path, status, role, attached, last_state_change)
+			 VALUES (?, ?, ?, ?, 'maintenance', 'root', ?, ?)`,
+			rootVolID, rootVolName, effectiveStorageMB, rootVolPath, vmid, now,
+		)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("insert root volume: %v", err))
+			return
+		}
+	}
+
 	createReq := &vm.CreateRequest{
 		VMID:            vmid,
 		Image:           req.Image,
 		VCPUs:           effectiveVCPUs,
 		MemoryMB:        effectiveMemoryMB,
 		StorageMB:       req.StorageMB,
+		RootVolumePath:  rootVolPath,
 		AttachedStorage: req.AttachedStorage,
 		Metadata:        req.Metadata,
 		InjectInitSSH:   req.InjectInitSSH,
 		NetworkBridge:   req.NetworkBridge,
 		NetworkSubnet:   req.NetworkSubnet,
+	}
+
+	// Resolve attached storage: look up volumes by ID or name in DB,
+	// fall back to raw filesystem paths for backward compatibility.
+	var attachedVolumeIDs []string
+	if len(req.AttachedStorage) > 0 && h.db != nil {
+		var resolvedPaths []string
+		for _, idOrName := range req.AttachedStorage {
+			var volID, volPath, volStatus string
+			err := h.db.QueryRow(
+				`SELECT id, path, status FROM volume WHERE (id = ? OR name = ?) LIMIT 1`,
+				idOrName, idOrName,
+			).Scan(&volID, &volPath, &volStatus)
+			if err == sql.ErrNoRows {
+				// Not in DB — try as raw filesystem path for backward compat
+				if _, statErr := os.Stat(idOrName); statErr != nil {
+					// Clean up root volume on early return
+					h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
+					writeError(w, http.StatusNotFound, fmt.Sprintf("volume %q not found in database and path does not exist", idOrName))
+					return
+				}
+				resolvedPaths = append(resolvedPaths, idOrName)
+				continue
+			}
+			if err != nil {
+				h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("query volume %q: %v", idOrName, err))
+				return
+			}
+			if volStatus != "online" {
+				h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
+				writeError(w, http.StatusConflict, fmt.Sprintf("volume %q is already attached", idOrName))
+				return
+			}
+			resolvedPaths = append(resolvedPaths, volPath)
+			attachedVolumeIDs = append(attachedVolumeIDs, volID)
+		}
+		createReq.AttachedStorage = resolvedPaths
 	}
 
 	result, err := h.mgr.Create(r.Context(), createReq)
@@ -166,18 +230,50 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 			db.SafeExec(h.db, `DELETE FROM ip_allocation WHERE vm_id = ?`, vmid)
 			db.SafeExec(h.db, `DELETE FROM port_rule WHERE vm_id = ?`, vmid)
 			db.SafeExec(h.db, `DELETE FROM vm WHERE id = ?`, vmid)
+			// Clean up root volume record and file
+			h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
+			if rootVolPath != "" {
+				os.Remove(rootVolPath)
+			}
+		}
+		// Reset any volumes we were about to attach
+		for _, volID := range attachedVolumeIDs {
+			db.SafeExec(h.db, "UPDATE volume SET status='online', attached=NULL, last_state_change=? WHERE id=?",
+				time.Now().UTC().Format(time.RFC3339), volID)
 		}
 		vmDir := filepath.Join(h.cfg.VMBaseDir, vmid)
 		os.RemoveAll(vmDir)
 		db.LogAction(h.db, "create", "vm", vmid, name, err.Error(), false)
 		h.logger.Error("create VM failed", zap.Error(err))
-		writeError(w, http.StatusInternalServerError, err.Error())
+		// Return a clean user-facing error — log has the full detail
+		userMsg := err.Error()
+		if strings.Contains(userMsg, "Bad magic number") || strings.Contains(userMsg, "not a valid ext4") {
+			userMsg = "image is not a valid ext4 filesystem — check the file is a rootfs.ext4 image, not a compressed archive"
+		} else if strings.Contains(userMsg, "e2fsck") || strings.Contains(userMsg, "resize2fs") {
+			userMsg = "filesystem resize failed — the image may be corrupt or not ext4"
+		} else if len(userMsg) > 200 {
+			userMsg = userMsg[:200]
+		}
+		writeError(w, http.StatusInternalServerError, userMsg)
 		return
+	}
+
+	// Mark root volume as attached and update VM with root_volume reference
+	if h.db != nil {
+		now = time.Now().UTC().Format(time.RFC3339)
+		db.SafeExec(h.db, "UPDATE volume SET status='attached', last_state_change=? WHERE id=?", now, rootVolID)
+		db.SafeExec(h.db, "UPDATE vm SET root_volume=? WHERE id=?", rootVolID, vmid)
+	}
+
+	// Mark resolved data volumes as attached to this VM
+	for _, volID := range attachedVolumeIDs {
+		db.SafeExec(h.db, "UPDATE volume SET status='attached', attached=?, last_state_change=? WHERE id=?",
+			vmid, time.Now().UTC().Format(time.RFC3339), volID)
 	}
 
 	// Update DB with running status
 	if h.db != nil {
-		db.SafeExec(h.db, 
+		db.SafeExec(h.db,
 			`UPDATE vm SET status = 'running', maintenance_operation = NULL, ip_address = ?, namespace = ?, last_state_change = ? WHERE id = ?`,
 			result.IPAddress, result.Namespace, time.Now().UTC().Format(time.RFC3339), vmid)
 	}
@@ -209,6 +305,12 @@ func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
 		db.SafeExec(h.db, "UPDATE vm SET status = 'maintenance', maintenance_operation = 'deleting', last_state_change = ? WHERE id = ?", now, vmID)
 	}
 
+	// Look up root volume before delete (vm_spec files will be removed)
+	var rootVolID sql.NullString
+	if h.db != nil {
+		h.db.QueryRow("SELECT root_volume FROM vm WHERE id=?", vmID).Scan(&rootVolID)
+	}
+
 	_, err := h.mgr.Delete(r.Context(), vmID, preserveStorage)
 	if err != nil {
 		// Mark as error — needs user attention. User can retry delete or inspect.
@@ -220,6 +322,22 @@ func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("delete VM failed", zap.String("vm_id", vmID), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// Handle root volume DB record
+	if h.db != nil && rootVolID.Valid {
+		if !preserveStorage {
+			// Delete root volume record — the file was already removed by deleteVM
+			db.SafeExec(h.db, "DELETE FROM volume WHERE id=?", rootVolID.String)
+		} else {
+			// Detach but keep volume available for re-use
+			db.SafeExec(h.db, "UPDATE volume SET status='online', attached=NULL, last_state_change=? WHERE id=?", now, rootVolID.String)
+		}
+	}
+
+	// Release all non-root data volumes attached to this VM
+	if h.db != nil {
+		db.SafeExec(h.db, "UPDATE volume SET status='online', attached=NULL, last_state_change=? WHERE attached=?", now, vmID)
 	}
 	if h.db != nil {
 		db.SafeExec(h.db, "UPDATE vm SET status = 'deleted', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)

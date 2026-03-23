@@ -135,8 +135,13 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 		return nil, fmt.Errorf("failed to create VM directory: %v", err)
 	}
 
-	t = time.Now()
+	// Determine rootfs destination: use root volume path if provided, else vmDir/rootfs.ext4
 	vmRootfs := filepath.Join(vmDir, "rootfs.ext4")
+	if req.RootVolumePath != "" {
+		vmRootfs = req.RootVolumePath
+	}
+
+	t = time.Now()
 	if err := copyFile(rootfs, vmRootfs); err != nil {
 		os.RemoveAll(vmDir)
 		cleanup()
@@ -216,6 +221,7 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	spec := struct {
 		VCPUs           int      `json:"vcpus"`
 		MemoryMB        int      `json:"memory_mb"`
+		RootVolumePath  string   `json:"root_volume_path,omitempty"`
 		NetworkBridge   string   `json:"network_bridge,omitempty"`
 		NetworkSubnet   string   `json:"network_subnet,omitempty"`
 		AttachedStorage []string `json:"attached_storage,omitempty"`
@@ -223,7 +229,7 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 		UploadMbps      int      `json:"upload_mbps,omitempty"`
 		DiskIOPS        int      `json:"disk_iops,omitempty"`
 		DiskBWMbps      int      `json:"disk_bw_mbps,omitempty"`
-	}{req.VCPUs, req.MemoryMB, req.NetworkBridge, req.NetworkSubnet, req.AttachedStorage,
+	}{req.VCPUs, req.MemoryMB, req.RootVolumePath, req.NetworkBridge, req.NetworkSubnet, req.AttachedStorage,
 		req.BandwidthMbps, req.UploadMbps, req.DiskIOPS, req.DiskBWMbps}
 	specData, err := json.Marshal(spec)
 	if err != nil {
@@ -531,30 +537,28 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 	log := reqLog(ctx, m.logger, vmID)
 	vmDir := filepath.Join(m.cfg.VMBaseDir, vmID)
 	vmRootfs := filepath.Join(vmDir, "rootfs.ext4")
-	if _, err := os.Stat(vmRootfs); err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("VM %s has no rootfs (run deploy first)", vmID)
-		}
-		return nil, err
-	}
 
 	vcpus, memoryMB := 2, 512
 	var netBridge, netSubnet string
 	var savedReq CreateRequest // for rate limiters and other saved fields
 	if data, err := os.ReadFile(filepath.Join(vmDir, "vm_spec.json")); err == nil {
 		var spec struct {
-			VCPUs         int    `json:"vcpus"`
-			MemoryMB      int    `json:"memory_mb"`
-			NetworkBridge string `json:"network_bridge"`
-			NetworkSubnet string `json:"network_subnet"`
-			BandwidthMbps int    `json:"bandwidth_mbps"`
-			UploadMbps    int    `json:"upload_mbps"`
-			DiskIOPS      int    `json:"disk_iops"`
-			DiskBWMbps    int    `json:"disk_bw_mbps"`
+			VCPUs          int    `json:"vcpus"`
+			MemoryMB       int    `json:"memory_mb"`
+			RootVolumePath string `json:"root_volume_path"`
+			NetworkBridge  string `json:"network_bridge"`
+			NetworkSubnet  string `json:"network_subnet"`
+			BandwidthMbps  int    `json:"bandwidth_mbps"`
+			UploadMbps     int    `json:"upload_mbps"`
+			DiskIOPS       int    `json:"disk_iops"`
+			DiskBWMbps     int    `json:"disk_bw_mbps"`
 		}
 		if json.Unmarshal(data, &spec) == nil {
 			if spec.VCPUs > 0 && spec.MemoryMB >= 128 {
 				vcpus, memoryMB = spec.VCPUs, spec.MemoryMB
+			}
+			if spec.RootVolumePath != "" {
+				vmRootfs = spec.RootVolumePath
 			}
 			netBridge = spec.NetworkBridge
 			netSubnet = spec.NetworkSubnet
@@ -563,6 +567,13 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 			savedReq.DiskIOPS = spec.DiskIOPS
 			savedReq.DiskBWMbps = spec.DiskBWMbps
 		}
+	}
+
+	if _, err := os.Stat(vmRootfs); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("VM %s has no rootfs (run deploy first)", vmID)
+		}
+		return nil, err
 	}
 
 	// Re-use existing IP or allocate new one

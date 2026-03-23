@@ -4,6 +4,7 @@ package api
 import (
 	"database/sql"
 	"net/http"
+	"path/filepath"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -41,6 +42,8 @@ func NewRouter(cfg *config.Config, mgr *vm.Manager, logger *zap.Logger, db *sql.
 	healthHandler := handlers.NewHealth(mgr, cfg, logger)
 	dashboardHandler := handlers.NewDashboard(db, logger)
 	networkHandler := handlers.NewNetwork(logger, db)
+	volumesDir := filepath.Join(filepath.Dir(cfg.VMBaseDir), "volumes")
+	volumeHandler := handlers.NewVolume(logger, db, volumesDir)
 
 	// Routes (GET and HEAD so curl -I works)
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -70,6 +73,14 @@ func NewRouter(cfg *config.Config, mgr *vm.Manager, logger *zap.Logger, db *sql.
 	r.Post("/networks", networkHandler.Create)
 	r.Get("/networks", networkHandler.List)
 	r.Delete("/networks/{name}", networkHandler.Delete)
+
+	r.Get("/volumes", volumeHandler.List)
+	r.Post("/volumes", volumeHandler.Create)
+	r.Get("/volumes/{idOrName}", volumeHandler.Get)
+	r.Delete("/volumes/{idOrName}", volumeHandler.Delete)
+	r.Post("/volumes/{idOrName}/resize", volumeHandler.Resize)
+	r.Post("/vms/{vmID}/volume/attach", volumeHandler.Attach)
+	r.Post("/vms/{vmID}/volume/detach", volumeHandler.Detach)
 
 	r.Get("/dashboard", dashboardHandler.Dashboard)
 
