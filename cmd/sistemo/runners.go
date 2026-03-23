@@ -174,6 +174,7 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+
 // downloadBinary downloads a file from url to dest. Automatically decompresses gzip.
 func downloadBinary(url, dest string, mode os.FileMode) error {
 	client := &http.Client{Timeout: 10 * time.Minute}
@@ -656,7 +657,7 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 	if syscall.Geteuid() != 0 {
 		logger.Warn("daemon running as non-root — VM create will fail (mount/namespace need root). Stop and run: sudo ./sistemo up")
 	}
-	mgr := vm.NewManager(cfg, logger, database)
+	mgr := vm.NewManager(context.Background(), cfg, logger, database)
 	router := api.NewRouter(cfg, mgr, logger, database)
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),
@@ -680,6 +681,7 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 		return err
 	}
 	logger.Info("shutting down gracefully (waiting up to 10s for connections to drain)")
+	mgr.Shutdown()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {

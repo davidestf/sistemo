@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"net/http"
 	"os"
@@ -100,11 +101,12 @@ func (h *Terminal) serveTerminalPage(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	// Use the same origin for WebSocket (replace http with ws)
 	wsURL := "ws://" + r.Host + r.URL.Path
-	html := terminalPageHTML(wsURL)
-	_, _ = w.Write([]byte(html))
+	if err := terminalTmpl.Execute(w, wsURL); err != nil {
+		http.Error(w, "template error", http.StatusInternalServerError)
+	}
 }
 
-const terminalPageHTMLTemplate = `<!DOCTYPE html>
+var terminalTmpl = template.Must(template.New("terminal").Parse(`<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
@@ -113,7 +115,7 @@ const terminalPageHTMLTemplate = `<!DOCTYPE html>
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
   <style>
-    html, body { margin: 0; padding: 0; height: 100%%; width: 100%%; overflow: hidden; background: #1e1e1e; }
+    html, body { margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden; background: #1e1e1e; }
     #term { height: 100vh; width: 100vw; display: block; }
   </style>
 </head>
@@ -121,7 +123,7 @@ const terminalPageHTMLTemplate = `<!DOCTYPE html>
   <div id="term"></div>
   <script>
     (function() {
-      var wsUrl = %q;
+      var wsUrl = {{.}};
       var term = new Terminal({ cursorBlink: true, theme: { background: '#1e1e1e' } });
       term.open(document.getElementById('term'));
       var fitAddon = new FitAddon.FitAddon();
@@ -149,16 +151,12 @@ const terminalPageHTMLTemplate = `<!DOCTYPE html>
         term.write(buf);
       };
       ws.onclose = function() { term.writeln('\\r\\n\\x1b[31m[Connection closed]\\x1b[m'); };
-      ws.onerror = function() { term.writeln('\\r\\n\\x1b[31m[WebSocket error]\\x1b[m'); };
+      ws.onerror = function() { term.writeln('\r\n\x1b[31m[WebSocket error]\x1b[m'); };
     })();
   </script>
 </body>
 </html>
-`
-
-func terminalPageHTML(wsURL string) string {
-	return fmt.Sprintf(terminalPageHTMLTemplate, wsURL)
-}
+`))
 
 func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 	vmID := chi.URLParam(r, "vmID")

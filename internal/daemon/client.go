@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 )
@@ -15,8 +16,14 @@ import (
 const DefaultURL = "http://127.0.0.1:7777"
 
 // URL returns the daemon base URL from env or default.
+// Validates that SISTEMO_DAEMON_URL uses http/https scheme to prevent redirect to untrusted hosts.
 func URL() string {
 	if u := os.Getenv("SISTEMO_DAEMON_URL"); u != "" {
+		parsed, err := url.Parse(u)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			fmt.Fprintf(os.Stderr, "Warning: SISTEMO_DAEMON_URL %q is invalid (must be http/https), using default\n", u)
+			return DefaultURL
+		}
 		return u
 	}
 	return DefaultURL

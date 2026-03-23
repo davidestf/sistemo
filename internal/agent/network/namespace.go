@@ -32,6 +32,7 @@ type VMNetwork struct {
 	TapName       string // TAP device for Firecracker
 	VMIP          string // unique IP from bridge subnet (e.g. 10.200.0.5)
 	HostBridge    string // host bridge to attach to (sistemo0 or br-<name>)
+	BlockSMTP     bool   // block outbound SMTP (ports 25, 465, 587)
 	Logger        *zap.Logger
 }
 
@@ -194,9 +195,11 @@ func (n *VMNetwork) Create() error {
 	}
 
 	// Block outbound SMTP (spam prevention) — rules auto-destroyed with namespace
-	for _, port := range []string{"25", "465", "587"} {
-		runInNamespace(n.NamespaceName, "iptables", "-I", "FORWARD", "1",
-			"-p", "tcp", "--dport", port, "-j", "DROP")
+	if n.BlockSMTP {
+		for _, port := range []string{"25", "465", "587"} {
+			runInNamespace(n.NamespaceName, "iptables", "-I", "FORWARD", "1",
+				"-p", "tcp", "--dport", port, "-j", "DROP")
+		}
 	}
 
 	log.Info("network setup complete",
@@ -239,6 +242,9 @@ func (n *VMNetwork) ExposePort(_ string, hostPort, vmPort int, protocol string) 
 	}
 	if protocol != "tcp" && protocol != "udp" {
 		return fmt.Errorf("protocol must be tcp or udp")
+	}
+	if gonet.ParseIP(n.VMIP) == nil {
+		return fmt.Errorf("invalid VM IP %q", n.VMIP)
 	}
 	hp := fmt.Sprintf("%d", hostPort)
 	vp := fmt.Sprintf("%d", vmPort)

@@ -9,6 +9,7 @@ import (
 	"regexp"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/davidestf/sistemo/internal/agent/network"
 	"github.com/davidestf/sistemo/internal/db"
@@ -66,11 +67,12 @@ func (h *Network) Create(w http.ResponseWriter, r *http.Request) {
 
 	// Persist network record so Delete can look up the bridge_name.
 	if h.db != nil {
-		db.SafeExec(h.db, `INSERT INTO network (name, subnet, bridge_name, created_at) VALUES (?, ?, ?, datetime('now'))
+		db.SafeExec(h.db, `INSERT INTO network (id, name, subnet, bridge_name, created_at) VALUES (?, ?, ?, ?, datetime('now'))
 			ON CONFLICT(name) DO UPDATE SET subnet=excluded.subnet, bridge_name=excluded.bridge_name`,
-			req.Name, req.Subnet, req.BridgeName)
+			uuid.NewString(), req.Name, req.Subnet, req.BridgeName)
 	}
 
+	db.LogAction(h.db, "create", "network", req.Name, req.Name, fmt.Sprintf("subnet=%s bridge=%s", req.Subnet, req.BridgeName), true)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"name":   req.Name,
 		"subnet": req.Subnet,
@@ -94,7 +96,11 @@ func (h *Network) Delete(w http.ResponseWriter, r *http.Request) {
 	// Check if any VMs are using this network
 	if h.db != nil {
 		var vmCount int
-		h.db.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = (SELECT id FROM network WHERE name = ?) AND status NOT IN ('deleted')", name).Scan(&vmCount)
+		if err := h.db.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = (SELECT id FROM network WHERE name = ?) AND status NOT IN ('deleted')", name).Scan(&vmCount); err != nil {
+			h.logger.Error("failed to check network usage", zap.String("network", name), zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to check network usage")
+			return
+		}
 		if vmCount > 0 {
 			writeError(w, http.StatusConflict, fmt.Sprintf("network %q has %d active VM(s) — delete or move them first", name, vmCount))
 			return
@@ -127,6 +133,7 @@ func (h *Network) Delete(w http.ResponseWriter, r *http.Request) {
 		db.SafeExec(h.db, "DELETE FROM network WHERE name = ?", name)
 	}
 
+	db.LogAction(h.db, "delete", "network", name, name, "", true)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"name":   name,
 		"status": "deleted",

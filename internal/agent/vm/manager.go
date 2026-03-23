@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	agent "github.com/davidestf/sistemo/internal/agent"
 	agentmw "github.com/davidestf/sistemo/internal/agent/api/middleware"
 	"github.com/davidestf/sistemo/internal/agent/config"
 	"github.com/davidestf/sistemo/internal/agent/network"
@@ -26,13 +27,16 @@ type Manager struct {
 	cfg     *config.Config
 	logger  *zap.Logger
 	db      *sql.DB
+	ctx     context.Context
+	cancel  context.CancelFunc
 	mu      sync.RWMutex
 	vms     map[string]*VMInfo
 	vmLocks sync.Map // map[string]*sync.Mutex — per-VM operation lock
 }
 
-func NewManager(cfg *config.Config, logger *zap.Logger, db *sql.DB) *Manager {
-	m := &Manager{cfg: cfg, logger: logger, db: db, vms: make(map[string]*VMInfo)}
+func NewManager(ctx context.Context, cfg *config.Config, logger *zap.Logger, db *sql.DB) *Manager {
+	ctx, cancel := context.WithCancel(ctx)
+	m := &Manager{cfg: cfg, logger: logger, db: db, ctx: ctx, cancel: cancel, vms: make(map[string]*VMInfo)}
 	if err := os.MkdirAll(cfg.VMBaseDir, 0755); err != nil {
 		logger.Fatal("failed to create VM base directory", zap.String("path", cfg.VMBaseDir), zap.Error(err))
 	}
@@ -62,12 +66,25 @@ func NewManager(cfg *config.Config, logger *zap.Logger, db *sql.DB) *Manager {
 	return m
 }
 
+// Shutdown cancels the manager's context, stopping the reconciler and background work.
+func (m *Manager) Shutdown() { m.cancel() }
+
 // runReconciler periodically checks for dead VM processes and cleans them up.
 func (m *Manager) runReconciler() {
-	ticker := time.NewTicker(30 * time.Second)
+	interval := agent.DefaultReconcilerInterval
+	if m.cfg.ReconcilerIntervalSec > 0 {
+		interval = time.Duration(m.cfg.ReconcilerIntervalSec) * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	for range ticker.C {
-		m.reconcile()
+	for {
+		select {
+		case <-m.ctx.Done():
+			m.logger.Info("reconciler stopped")
+			return
+		case <-ticker.C:
+			m.reconcile()
+		}
 	}
 }
 
@@ -499,7 +516,7 @@ func (m *Manager) waitForSSH(vmIP string, timeout time.Duration) bool {
 	var lastErr error
 	for time.Since(start) < timeout {
 		attempt++
-		conn, err := net.DialTimeout("tcp", vmIP+":22", 200*time.Millisecond)
+		conn, err := net.DialTimeout("tcp", vmIP+":22", agent.SSHDialTimeout)
 		if err == nil {
 			conn.Close()
 			m.logger.Info("SSH ready",
@@ -509,7 +526,7 @@ func (m *Manager) waitForSSH(vmIP string, timeout time.Duration) bool {
 			return true
 		}
 		lastErr = err
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(agent.SSHPollInterval)
 	}
 	m.logger.Warn("SSH readiness check timed out",
 		zap.String("vm_ip", vmIP),

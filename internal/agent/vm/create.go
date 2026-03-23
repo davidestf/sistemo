@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	agent "github.com/davidestf/sistemo/internal/agent"
 	agentmw "github.com/davidestf/sistemo/internal/agent/api/middleware"
 	"github.com/davidestf/sistemo/internal/agent/config"
 	"github.com/davidestf/sistemo/internal/agent/firecracker"
@@ -82,6 +83,7 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 
 	t := time.Now()
 	net := network.NewVMNetwork(req.VMID, vmIP, m.logger, req.NetworkBridge)
+	net.BlockSMTP = m.cfg.BlockSMTP
 	if err := net.Create(); err != nil {
 		network.ReleaseIP(m.db, req.VMID)
 		return nil, fmt.Errorf("failed to create network namespace: %v", err)
@@ -240,7 +242,11 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	m.registerVM(&VMInfo{VMID: req.VMID, Namespace: net.NamespaceName, IP: vmIP, Status: "running", PID: pid, NetworkBridge: req.NetworkBridge})
 
 	t = time.Now()
-	sshReady := m.waitForSSH(vmIP, 20*time.Second)
+	sshTimeout := agent.DefaultSSHTimeout
+	if m.cfg.SSHTimeoutSec > 0 {
+		sshTimeout = time.Duration(m.cfg.SSHTimeoutSec) * time.Second
+	}
+	sshReady := m.waitForSSH(vmIP, sshTimeout)
 	log.Info("phase: ssh_wait", zap.Duration("elapsed", time.Since(t)), zap.Bool("ready", sshReady))
 
 	log.Info("create complete", zap.Duration("total", time.Since(startTime)), zap.String("boot_method", "fresh"))
@@ -331,20 +337,58 @@ func ssrfSafeClient() *http.Client {
 	}
 }
 
-// downloadFromURL downloads url to dest (creates parent dirs). Decompresses gzip if needed. Returns path and optional SHA256 hex.
-func downloadFromURL(rawurl, dest string) (string, *string, error) {
-	if err := validateImageURL(rawurl); err != nil {
-		return "", nil, err
+// httpStatusError represents an HTTP response with a non-2xx status code.
+// It carries the status code so callers can distinguish retryable (5xx) from
+// non-retryable (4xx) failures.
+type httpStatusError struct {
+	StatusCode int
+	Status     string
+}
+
+func (e *httpStatusError) Error() string { return e.Status }
+
+// isRetryable returns true for errors that are worth retrying: network errors
+// and HTTP 5xx responses. HTTP 4xx and other validation errors are not retried.
+func isRetryable(err error) bool {
+	if err == nil {
+		return false
 	}
-	if _, err := os.Stat(dest); err == nil {
-		// Verify cached file is valid ext4 before returning
-		if verifyExt4Superblock(dest) != nil {
-			os.Remove(dest) // corrupt cache, re-download
-		} else {
-			return dest, nil, nil
-		}
+	// HTTP 5xx → retry; HTTP 4xx → don't
+	var httpErr *httpStatusError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode/100 == 5
 	}
-	os.MkdirAll(filepath.Dir(dest), 0755)
+	// Network-level errors (DNS, connection refused, timeout, etc.) → retry
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	// I/O errors during body read (connection reset, unexpected EOF) → retry
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ETIMEDOUT) {
+		return true
+	}
+	return false
+}
+
+// doDownload performs a single HTTP GET of rawurl, writing the (possibly gzip-
+// decompressed) content to dest. Returns the final path, an optional SHA-256
+// hex digest, and any error encountered.
+func doDownload(rawurl, dest string) (string, *string, error) {
 	client := ssrfSafeClient()
 	resp, err := client.Get(rawurl)
 	if err != nil {
@@ -352,7 +396,7 @@ func downloadFromURL(rawurl, dest string) (string, *string, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return "", nil, errors.New(resp.Status)
+		return "", nil, &httpStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
 	}
 
 	// Write to temp file, rename on success (prevents corrupt cache from partial downloads).
@@ -408,6 +452,45 @@ func downloadFromURL(rawurl, dest string) (string, *string, error) {
 	}
 	shaStr := hex.EncodeToString(h.Sum(nil))
 	return dest, &shaStr, nil
+}
+
+// downloadFromURL downloads url to dest (creates parent dirs). Decompresses
+// gzip if needed. Returns path and optional SHA256 hex. Transient failures
+// (network errors, HTTP 5xx) are retried with exponential backoff.
+func downloadFromURL(rawurl, dest string) (string, *string, error) {
+	if err := validateImageURL(rawurl); err != nil {
+		return "", nil, err
+	}
+	if _, err := os.Stat(dest); err == nil {
+		// Verify cached file is valid ext4 before returning
+		if verifyExt4Superblock(dest) != nil {
+			os.Remove(dest) // corrupt cache, re-download
+		} else {
+			return dest, nil, nil
+		}
+	}
+	os.MkdirAll(filepath.Dir(dest), 0755)
+
+	var lastErr error
+	for attempt := 0; attempt < agent.DefaultMaxDownloadRetries; attempt++ {
+		if attempt > 0 {
+			delay := agent.DefaultDownloadBaseDelay * (1 << attempt)
+			if delay > agent.MaxDownloadBackoff {
+				delay = agent.MaxDownloadBackoff
+			}
+			time.Sleep(delay)
+		}
+
+		path, sha, err := doDownload(rawurl, dest)
+		if err == nil {
+			return path, sha, nil
+		}
+		lastErr = err
+		if !isRetryable(err) {
+			return "", nil, err
+		}
+	}
+	return "", nil, fmt.Errorf("image download failed after %d attempts: %w", agent.DefaultMaxDownloadRetries, lastErr)
 }
 
 func hasHTTPPrefix(s string) bool {
@@ -500,6 +583,7 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 
 	t := time.Now()
 	net := network.NewVMNetwork(vmID, vmIP, m.logger, netBridge)
+	net.BlockSMTP = m.cfg.BlockSMTP
 	if err := net.Create(); err != nil {
 		if freshlyAllocated {
 			network.ReleaseIP(m.db, vmID)
@@ -584,7 +668,11 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 	}
 
 	t = time.Now()
-	sshReady := m.waitForSSH(vmIP, 20*time.Second)
+	sshTimeout := agent.DefaultSSHTimeout
+	if m.cfg.SSHTimeoutSec > 0 {
+		sshTimeout = time.Duration(m.cfg.SSHTimeoutSec) * time.Second
+	}
+	sshReady := m.waitForSSH(vmIP, sshTimeout)
 	log.Info("phase: ssh_wait", zap.Duration("elapsed", time.Since(t)), zap.Bool("ready", sshReady))
 
 	msg := fmt.Sprintf("pid=%d, namespace=%s (started from existing rootfs)", pid, net.NamespaceName)

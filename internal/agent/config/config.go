@@ -43,9 +43,25 @@ type Config struct {
 	DefaultIOPS       int `envconfig:"DEFAULT_IOPS" default:"0"`
 	DefaultDiskBWMbps int `envconfig:"DEFAULT_DISK_BW_MBPS" default:"0"`
 
+	// Reconciler interval in seconds (how often to check for dead VM processes).
+	// Default: 30 seconds. Set higher to reduce overhead on large fleets.
+	ReconcilerIntervalSec int `envconfig:"RECONCILER_INTERVAL_SEC" default:"30"`
+
+	// SSH readiness timeout in seconds (how long to wait for SSH after boot).
+	// Default: 20 seconds. Increase if VMs take longer to boot.
+	SSHTimeoutSec int `envconfig:"SSH_TIMEOUT_SEC" default:"20"`
+
+	// Block outbound SMTP from VMs (ports 25, 465, 587) to prevent spam.
+	// Default true. Set to false only if your VMs need to send email directly.
+	BlockSMTP bool `envconfig:"BLOCK_SMTP" default:"true"`
+
 	// Bridge subnet for VM networking (default: 10.200.0.0/16)
 	// Change if it conflicts with your VPN, Kubernetes, or other networks.
 	BridgeSubnet string `envconfig:"BRIDGE_SUBNET" default:"10.200.0.0/16"`
+
+	// API rate limiting per IP (0 = disabled)
+	RateLimitRPS   int `envconfig:"RATE_LIMIT_RPS" default:"100"`
+	RateLimitBurst int `envconfig:"RATE_LIMIT_BURST" default:"200"`
 }
 
 // yamlConfig mirrors Config fields for YAML parsing. Only non-zero values override.
@@ -60,7 +76,12 @@ type yamlConfig struct {
 	DefaultUploadMbps    *int    `yaml:"default_upload_mbps"`
 	DefaultIOPS          *int    `yaml:"default_iops"`
 	DefaultDiskBWMbps    *int    `yaml:"default_disk_bw_mbps"`
+	ReconcilerIntervalSec *int  `yaml:"reconciler_interval_sec"`
+	SSHTimeoutSec        *int    `yaml:"ssh_timeout_sec"`
+	BlockSMTP            *bool   `yaml:"block_smtp"`
 	BridgeSubnet         *string `yaml:"bridge_subnet"`
+	RateLimitRPS         *int    `yaml:"rate_limit_rps"`
+	RateLimitBurst       *int    `yaml:"rate_limit_burst"`
 }
 
 // LoadFromFile reads a YAML config file and applies non-zero values to cfg.
@@ -104,8 +125,23 @@ func LoadFromFile(path string, cfg *Config) error {
 	if yc.DefaultDiskBWMbps != nil {
 		cfg.DefaultDiskBWMbps = *yc.DefaultDiskBWMbps
 	}
+	if yc.ReconcilerIntervalSec != nil {
+		cfg.ReconcilerIntervalSec = *yc.ReconcilerIntervalSec
+	}
+	if yc.SSHTimeoutSec != nil {
+		cfg.SSHTimeoutSec = *yc.SSHTimeoutSec
+	}
+	if yc.BlockSMTP != nil {
+		cfg.BlockSMTP = *yc.BlockSMTP
+	}
 	if yc.BridgeSubnet != nil {
 		cfg.BridgeSubnet = *yc.BridgeSubnet
+	}
+	if yc.RateLimitRPS != nil {
+		cfg.RateLimitRPS = *yc.RateLimitRPS
+	}
+	if yc.RateLimitBurst != nil {
+		cfg.RateLimitBurst = *yc.RateLimitBurst
 	}
 	return nil
 }
@@ -166,6 +202,9 @@ func applyExplicitEnvOverrides(cfg *Config) {
 	if v := os.Getenv("HOST_API_KEY"); v != "" {
 		cfg.APIKey = v
 	}
+	if v := os.Getenv("BLOCK_SMTP"); v != "" {
+		cfg.BlockSMTP = v == "true" || v == "1"
+	}
 	if v := os.Getenv("BRIDGE_SUBNET"); v != "" {
 		cfg.BridgeSubnet = v
 	}
@@ -176,6 +215,10 @@ func applyExplicitEnvOverrides(cfg *Config) {
 	applyIntEnvOverride("DEFAULT_UPLOAD_MBPS", &cfg.DefaultUploadMbps)
 	applyIntEnvOverride("DEFAULT_IOPS", &cfg.DefaultIOPS)
 	applyIntEnvOverride("DEFAULT_DISK_BW_MBPS", &cfg.DefaultDiskBWMbps)
+	applyIntEnvOverride("RECONCILER_INTERVAL_SEC", &cfg.ReconcilerIntervalSec)
+	applyIntEnvOverride("SSH_TIMEOUT_SEC", &cfg.SSHTimeoutSec)
+	applyIntEnvOverride("RATE_LIMIT_RPS", &cfg.RateLimitRPS)
+	applyIntEnvOverride("RATE_LIMIT_BURST", &cfg.RateLimitBurst)
 	if v := os.Getenv("MIN_DISK_FREE_MB"); v != "" {
 		var n int64
 		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {

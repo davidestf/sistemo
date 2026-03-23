@@ -15,6 +15,10 @@ import (
 func execOnVM(ctx context.Context, m *Manager, vmID, script string, timeoutSec int) (*ExecResult, error) {
 	m.mu.RLock()
 	info, ok := m.vms[vmID]
+	var vmIP string
+	if ok {
+		vmIP = info.IP
+	}
 	m.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("VM %s not found", vmID)
@@ -43,7 +47,7 @@ func execOnVM(ctx context.Context, m *Manager, vmID, script string, timeoutSec i
 		"-o", "PasswordAuthentication=no",
 		"-o", "AddressFamily=inet",
 		"-o", "ConnectTimeout=8",
-		fmt.Sprintf("%s@%s", m.cfg.SSHUser, info.IP),
+		fmt.Sprintf("%s@%s", m.cfg.SSHUser, vmIP),
 		script,
 	}
 

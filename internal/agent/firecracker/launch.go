@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	agent "github.com/davidestf/sistemo/internal/agent"
 	"go.uber.org/zap"
 )
 
@@ -93,9 +94,25 @@ func LaunchInNamespace(vmBaseDir string, vmID string, firecrackerBin string, cfg
 		logFile.Close()
 	}()
 
-	time.Sleep(20 * time.Millisecond)
-	if err := syscall.Kill(pid, 0); err != nil {
-		return 0, fmt.Errorf("firecracker process exited immediately, check %s", logPath)
+	// Poll until the API socket appears or the process dies.
+	deadline := time.Now().Add(agent.DefaultFCReadinessTimeout)
+	for {
+		if err := syscall.Kill(pid, 0); err != nil {
+			return 0, fmt.Errorf("firecracker process exited immediately, check %s", logPath)
+		}
+		if _, err := os.Stat(apiSock); err == nil {
+			logger.Debug("Firecracker API socket ready", zap.String("socket", apiSock))
+			break
+		}
+		if time.Now().After(deadline) {
+			// Process is alive but socket never appeared — tolerate this
+			// for FC versions that may not create the socket file.
+			logger.Warn("Firecracker API socket not found within timeout, continuing anyway",
+				zap.String("socket", apiSock),
+				zap.Duration("timeout", agent.DefaultFCReadinessTimeout))
+			break
+		}
+		time.Sleep(agent.FCReadinessPollInterval)
 	}
 
 	if err := os.WriteFile(filepath.Join(vmDir, "firecracker.pid"), []byte(fmt.Sprintf("%d", pid)), 0644); err != nil {
