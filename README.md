@@ -12,11 +12,9 @@
 
 ---
 
-**Sistemo** turns your Linux machine into a lightweight VM host. One binary, one command, real VMs — each with its own kernel, systemd, and network stack. No QEMU, no libvirt, no YAML. Deploy a Debian VM in 3 seconds.
+**Sistemo** turns your Linux machine into a lightweight VM host. One binary, one command, real VMs — each with its own kernel, systemd, and network stack. No QEMU, no libvirt, no YAML. Deploy a Debian VM in 10 seconds.
 
 ## Real VMs, not containers
-
-Each VM has its own kernel, its own systemd, its own network stack. Install packages with `apt`. Run services with `systemctl`. It works exactly like a real server — because it is one.
 
 | | Sistemo | Docker | Proxmox |
 |---|---|---|---|
@@ -73,6 +71,16 @@ sistemo vm deploy debian --name postgres --network production
 sistemo volume create 5G --name pgdata
 sistemo vm deploy debian --name db --attach=pgdata
 
+# Resize a volume
+sistemo volume resize mydata 10GB
+
+# Attach/detach volumes at runtime
+sistemo volume attach myvm mydata
+sistemo volume detach myvm mydata
+
+# Delete a VM but keep its root volume
+sistemo vm delete myvm --preserve-storage
+
 # Diagnose your setup
 sudo sistemo doctor
 ```
@@ -84,7 +92,7 @@ sudo sistemo doctor
 - **Named networks** -- Isolated VM groups with `--network production`
 - **Port expose** -- `--expose 80` or `--expose 8080:3000`
 - **Custom images** -- Build from any Docker image: `sistemo image build nginx:latest`
-- **Persistent volumes** -- Survive VM delete, reattach anywhere
+- **Persistent volumes** -- Create, resize, attach/detach; every VM's rootfs is also tracked as a volume
 - **Systemd service** -- `sistemo service install` survives reboots
 - **Health check** -- `sistemo doctor` diagnoses your entire setup
 - **Audit log** -- `sistemo history` shows every operation
@@ -135,6 +143,7 @@ sistemo vm ssh <name>                     SSH into a VM
 sistemo vm exec <name> <command>          Run a command
 sistemo vm restart|stop|start <name>      Lifecycle
 sistemo vm delete <name>                  Remove a VM
+  --preserve-storage                        Keep root volume on delete
 sistemo vm status <name>                  Show details
 sistemo vm expose <name> --port P         Expose port at runtime
 sistemo vm unexpose <name> --port P       Remove port expose
@@ -144,6 +153,11 @@ sistemo network list                      List networks
 sistemo network delete <name>             Delete network
 
 sistemo volume create <size> [--name=N]   Create persistent volume
+sistemo volume list                       List volumes
+sistemo volume delete <name>              Delete a volume
+sistemo volume resize <name> <size>       Resize a volume
+sistemo volume attach <vm> <volume>       Attach volume to a VM
+sistemo volume detach <vm> <volume>       Detach volume from a VM
 sistemo image build <docker-image>        Build rootfs from Docker
 sistemo image list                        List available images
 sistemo service install                   Run as systemd service

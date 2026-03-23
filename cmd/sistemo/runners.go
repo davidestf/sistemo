@@ -20,7 +20,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/davidestf/sistemo/internal/agent/api"
@@ -718,10 +717,29 @@ func runList(logger *zap.Logger, database *sql.DB) error {
 		fmt.Println("No VMs. Deploy one with: sistemo vm deploy <image>")
 		return nil
 	}
+	// Build volume count map
+	volCounts := make(map[string]int)
+	volRows, err := database.Query("SELECT attached, COUNT(*) FROM volume WHERE attached IS NOT NULL GROUP BY attached")
+	if err == nil {
+		defer volRows.Close()
+		for volRows.Next() {
+			var vmID string
+			var cnt int
+			if volRows.Scan(&vmID, &cnt) == nil {
+				volCounts[vmID] = cnt
+			}
+		}
+	}
+
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tIMAGE\tIP\tNETWORK")
+	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tIMAGE\tIP\tNETWORK\tVOLUMES")
 	for _, r := range rowsData {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", r.id, r.name, r.status, r.image, r.ip, r.network)
+		vc := volCounts[r.id]
+		volStr := "-"
+		if vc > 0 {
+			volStr = fmt.Sprintf("%d", vc)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.id, r.name, r.status, r.image, r.ip, r.network, volStr)
 	}
 	tw.Flush()
 	return nil
@@ -1213,13 +1231,13 @@ func lookupVM(database *sql.DB, nameOrID string, excludeStatuses ...string) (str
 	return vmID, nil
 }
 
-func runDelete(logger *zap.Logger, database *sql.DB, nameOrID string) error {
+func runDelete(logger *zap.Logger, database *sql.DB, nameOrID string, preserveStorage bool) error {
 	baseURL := daemon.URL()
 	vmID, err := lookupVM(database, nameOrID, "deleted")
 	if err != nil {
 		return err
 	}
-	_, err = daemon.DeleteVM(baseURL, vmID)
+	_, err = daemon.DeleteVM(baseURL, vmID, preserveStorage)
 	if err != nil {
 		daemonUnreachable := strings.Contains(err.Error(), "connection refused") ||
 			strings.Contains(err.Error(), "connection reset") ||
@@ -1366,6 +1384,24 @@ func runStatus(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 		fmt.Printf("Network:   default\n")
 	}
 
+	// Show attached volumes
+	volRows, err := database.Query("SELECT name, size_mb, role, path FROM volume WHERE attached = ?", id.String)
+	if err == nil {
+		defer volRows.Close()
+		first := true
+		for volRows.Next() {
+			var vName, vRole, vPath string
+			var vSize int
+			if volRows.Scan(&vName, &vSize, &vRole, &vPath) == nil {
+				if first {
+					fmt.Printf("Volumes:\n")
+					first = false
+				}
+				fmt.Printf("  %s (%s, %d MB) %s\n", vName, vRole, vSize, vPath)
+			}
+		}
+	}
+
 	// Show exposed ports
 	portRows, err := database.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", id.String)
 	if err == nil {
@@ -1465,145 +1501,89 @@ func runExec(logger *zap.Logger, database *sql.DB, nameOrID, command string) err
 	return nil
 }
 
-type volumeEntry struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Path   string `json:"path"`
-	SizeMB int    `json:"size_mb"`
-}
-
-func volumesDir(dataDir string) string   { return filepath.Join(dataDir, "volumes") }
-func volumeIndexPath(dataDir string) string { return filepath.Join(volumesDir(dataDir), "index.json") }
-
-func readVolumeIndex(dataDir string) ([]volumeEntry, error) {
-	path := volumeIndexPath(dataDir)
-	data, err := os.ReadFile(path)
+func runStorageCreate(logger *zap.Logger, sizeMB int, name string) error {
+	baseURL := daemon.URL()
+	if err := daemon.Health(baseURL); err != nil {
+		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
+	}
+	vol, err := daemon.CreateVolume(baseURL, sizeMB, name)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
+		return fmt.Errorf("create volume: %w", err)
 	}
-	var list []volumeEntry
-	if err := json.Unmarshal(data, &list); err != nil {
-		return nil, err
-	}
-	return list, nil
-}
-
-func writeVolumeIndex(dataDir string, list []volumeEntry) error {
-	dir := volumesDir(dataDir)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(list, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(volumeIndexPath(dataDir), data, 0644)
-}
-
-func resolveVolumePath(dataDir, idOrName string) string {
-	list, err := readVolumeIndex(dataDir)
-	if err != nil || list == nil {
-		return ""
-	}
-	for _, v := range list {
-		if v.ID == idOrName || v.Name == idOrName {
-			if _, err := os.Stat(v.Path); err == nil {
-				return v.Path
-			}
-			return ""
-		}
-	}
-	return ""
-}
-
-func runStorageCreate(logger *zap.Logger, dataDir string, sizeMB int, name string) error {
-	list, err := readVolumeIndex(dataDir)
-	if err != nil {
-		return fmt.Errorf("read volume index: %w", err)
-	}
-	if list == nil {
-		list = []volumeEntry{}
-	}
-	id := uuid.New().String()
-	dir := volumesDir(dataDir)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create volumes dir: %w", err)
-	}
-	path := filepath.Join(dir, id+".ext4")
-	f, err := os.Create(path)
-	if err != nil {
-		return fmt.Errorf("create volume file: %w", err)
-	}
-	if err := f.Truncate(int64(sizeMB) * 1024 * 1024); err != nil {
-		f.Close()
-		os.Remove(path)
-		return fmt.Errorf("truncate volume: %w", err)
-	}
-	f.Close()
-	cmd := exec.Command("mkfs.ext4", "-q", "-F", path)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		os.Remove(path)
-		return fmt.Errorf("mkfs.ext4: %w (%s)", err, string(out))
-	}
-	if name == "" {
-		name = id[:8]
-	}
-	list = append(list, volumeEntry{ID: id, Name: name, Path: path, SizeMB: sizeMB})
-	if err := writeVolumeIndex(dataDir, list); err != nil {
-		os.Remove(path)
-		return fmt.Errorf("write volume index: %w", err)
-	}
-	fmt.Printf("Created volume %s (%s) %d MB at %s\n", id, name, sizeMB, path)
-	fmt.Println("To attach: deploy a VM with --attach=ID (e.g. sistemo vm deploy --attach=" + id + " <image>)")
+	fmt.Printf("Created volume %s (%s) %d MB\n", vol.Name, vol.ID, vol.SizeMB)
 	return nil
 }
 
-func runStorageList(logger *zap.Logger, dataDir string) error {
-	list, err := readVolumeIndex(dataDir)
+func runStorageList(logger *zap.Logger) error {
+	baseURL := daemon.URL()
+	if err := daemon.Health(baseURL); err != nil {
+		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
+	}
+	list, err := daemon.ListVolumes(baseURL)
 	if err != nil {
-		return fmt.Errorf("read volume index: %w", err)
+		return fmt.Errorf("list volumes: %w", err)
 	}
 	if len(list) == 0 {
 		fmt.Println("No volumes. Create one with: sistemo volume create <size_mb> [--name=myvol]")
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "VOLUME ID\tNAME\tSIZE (MB)\tPATH")
+	fmt.Fprintln(tw, "ID\tNAME\tSIZE\tSTATUS\tATTACHED TO")
 	for _, v := range list {
-		path := v.Path
-		if _, err := os.Stat(v.Path); err != nil {
-			path = v.Path + " (missing)"
+		attached := v.Attached
+		if attached == "" {
+			attached = "(none)"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\n", v.ID, v.Name, v.SizeMB, path)
+		fmt.Fprintf(tw, "%s\t%s\t%d MB\t%s\t%s\n", v.ID, v.Name, v.SizeMB, v.Status, attached)
 	}
 	tw.Flush()
 	return nil
 }
 
-func runStorageDelete(logger *zap.Logger, dataDir, idOrName string) error {
-	list, err := readVolumeIndex(dataDir)
-	if err != nil {
-		return fmt.Errorf("read volume index: %w", err)
+func runStorageDelete(logger *zap.Logger, idOrName string) error {
+	baseURL := daemon.URL()
+	if err := daemon.Health(baseURL); err != nil {
+		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
 	}
-	var newList []volumeEntry
-	var path string
-	for _, v := range list {
-		if v.ID == idOrName || v.Name == idOrName {
-			path = v.Path
-			continue
-		}
-		newList = append(newList, v)
+	if err := daemon.DeleteVolume(baseURL, idOrName); err != nil {
+		return fmt.Errorf("delete volume: %w", err)
 	}
-	if path == "" {
-		return fmt.Errorf("volume not found: %s", idOrName)
-	}
-	if err := writeVolumeIndex(dataDir, newList); err != nil {
-		return fmt.Errorf("write volume index: %w", err)
-	}
-	os.Remove(path)
 	fmt.Printf("Deleted volume %s\n", idOrName)
+	return nil
+}
+
+func runStorageResize(logger *zap.Logger, idOrName string, sizeMB int) error {
+	baseURL := daemon.URL()
+	if err := daemon.Health(baseURL); err != nil {
+		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
+	}
+	if err := daemon.ResizeVolume(baseURL, idOrName, sizeMB); err != nil {
+		return fmt.Errorf("resize volume: %w", err)
+	}
+	fmt.Printf("Resized volume %s to %d MB\n", idOrName, sizeMB)
+	return nil
+}
+
+func runStorageAttach(logger *zap.Logger, vmIDOrName, volumeIDOrName string) error {
+	baseURL := daemon.URL()
+	if err := daemon.Health(baseURL); err != nil {
+		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
+	}
+	if err := daemon.AttachVolume(baseURL, vmIDOrName, volumeIDOrName); err != nil {
+		return fmt.Errorf("attach volume: %w", err)
+	}
+	fmt.Printf("Attached volume %s to VM %s\n", volumeIDOrName, vmIDOrName)
+	return nil
+}
+
+func runStorageDetach(logger *zap.Logger, vmIDOrName, volumeIDOrName string) error {
+	baseURL := daemon.URL()
+	if err := daemon.Health(baseURL); err != nil {
+		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
+	}
+	if err := daemon.DetachVolume(baseURL, vmIDOrName, volumeIDOrName); err != nil {
+		return fmt.Errorf("detach volume: %w", err)
+	}
+	fmt.Printf("Detached volume %s\n", volumeIDOrName)
 	return nil
 }

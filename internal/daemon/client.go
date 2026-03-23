@@ -47,9 +47,9 @@ func doRequest(req *http.Request, timeout time.Duration) (*http.Response, error)
 	return resp, nil
 }
 
-// checkResponse reads the response and returns an error if status is not OK (200).
+// checkResponse reads the response and returns an error if status is not 2xx.
 func checkResponse(resp *http.Response) error {
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var errBody bytes.Buffer
 		_, _ = errBody.ReadFrom(io.LimitReader(resp.Body, 1<<20))
 		return fmt.Errorf("daemon returned %d: %s", resp.StatusCode, errBody.String())
@@ -108,8 +108,12 @@ func CreateVM(baseURL string, req *CreateVMRequest) (*CreateVMResponse, error) {
 }
 
 // DeleteVM calls DELETE /vms/{vmID} on the daemon.
-func DeleteVM(baseURL, vmID string) (bool, error) {
-	httpReq, err := http.NewRequest(http.MethodDelete, baseURL+"/vms/"+vmID+"?preserve_storage=false", nil)
+func DeleteVM(baseURL, vmID string, preserveStorage bool) (bool, error) {
+	ps := "false"
+	if preserveStorage {
+		ps = "true"
+	}
+	httpReq, err := http.NewRequest(http.MethodDelete, baseURL+"/vms/"+vmID+"?preserve_storage="+ps, nil)
 	if err != nil {
 		return false, err
 	}
@@ -302,4 +306,168 @@ func Exec(baseURL, vmID, script string, timeoutSec int) (*ExecResult, error) {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return &out, nil
+}
+
+// VolumeResponse is the response from volume API endpoints.
+type VolumeResponse struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	SizeMB          int    `json:"size_mb"`
+	Path            string `json:"path"`
+	Status          string `json:"status"`
+	Attached        string `json:"attached,omitempty"`
+	Created         string `json:"created,omitempty"`
+	LastStateChange string `json:"last_state_change,omitempty"`
+}
+
+// CreateVolume calls POST /volumes on the daemon.
+func CreateVolume(baseURL string, sizeMB int, name string) (*VolumeResponse, error) {
+	body := struct {
+		SizeMB int    `json:"size_mb"`
+		Name   string `json:"name"`
+	}{SizeMB: sizeMB, Name: name}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/volumes", bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := doRequest(httpReq, 60*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if err := checkResponse(resp); err != nil {
+		return nil, err
+	}
+	var out VolumeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &out, nil
+}
+
+// ListVolumes calls GET /volumes on the daemon.
+func ListVolumes(baseURL string) ([]VolumeResponse, error) {
+	httpReq, err := http.NewRequest(http.MethodGet, baseURL+"/volumes", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := doRequest(httpReq, 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if err := checkResponse(resp); err != nil {
+		return nil, err
+	}
+	var out []VolumeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return out, nil
+}
+
+// GetVolume calls GET /volumes/{idOrName} on the daemon.
+func GetVolume(baseURL, idOrName string) (*VolumeResponse, error) {
+	httpReq, err := http.NewRequest(http.MethodGet, baseURL+"/volumes/"+idOrName, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := doRequest(httpReq, 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if err := checkResponse(resp); err != nil {
+		return nil, err
+	}
+	var out VolumeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+	return &out, nil
+}
+
+// DeleteVolume calls DELETE /volumes/{idOrName} on the daemon.
+func DeleteVolume(baseURL, idOrName string) error {
+	httpReq, err := http.NewRequest(http.MethodDelete, baseURL+"/volumes/"+idOrName, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := doRequest(httpReq, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return checkResponse(resp)
+}
+
+// ResizeVolume calls POST /volumes/{idOrName}/resize on the daemon.
+func ResizeVolume(baseURL, idOrName string, sizeMB int) error {
+	body := struct {
+		SizeMB int `json:"size_mb"`
+	}{SizeMB: sizeMB}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/volumes/"+idOrName+"/resize", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := doRequest(httpReq, 120*time.Second)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return checkResponse(resp)
+}
+
+// AttachVolume calls POST /vms/{vmID}/volume/attach on the daemon.
+func AttachVolume(baseURL, vmID, volumeIDOrName string) error {
+	body := struct {
+		Volume string `json:"volume"`
+	}{Volume: volumeIDOrName}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/vms/%s/volume/attach", baseURL, vmID), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := doRequest(httpReq, 10*time.Second)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return checkResponse(resp)
+}
+
+// DetachVolume calls POST /vms/{vmID}/volume/detach on the daemon.
+func DetachVolume(baseURL, vmID, volumeIDOrName string) error {
+	body := struct {
+		Volume string `json:"volume"`
+	}{Volume: volumeIDOrName}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/vms/%s/volume/detach", baseURL, vmID), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := doRequest(httpReq, 10*time.Second)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return checkResponse(resp)
 }

@@ -1,0 +1,1 @@
+ALTER TABLE volume ADD COLUMN role TEXT NOT NULL DEFAULT 'data';

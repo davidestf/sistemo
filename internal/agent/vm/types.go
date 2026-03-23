@@ -16,6 +16,9 @@ type CreateRequest struct {
 	DiskBWMbps      int               `json:"disk_bw_mbps,omitempty"`
 	// InjectInitSSH: inject /init and SSH key into rootfs so terminal/exec work.
 	InjectInitSSH bool `json:"inject_init_ssh,omitempty"`
+	// RootVolumePath: if set, the image is copied here instead of vmDir/rootfs.ext4.
+	// The handler creates a managed volume at this path; createFresh uses it as the rootfs destination.
+	RootVolumePath string `json:"root_volume_path,omitempty"`
 	// Named network: if set, VM is attached to this bridge instead of sistemo0.
 	NetworkBridge string `json:"network_bridge,omitempty"`
 	NetworkSubnet string `json:"network_subnet,omitempty"`
