@@ -2,12 +2,9 @@ package handlers
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"regexp"
 	"strings"
-
-	sisterr "github.com/davidestf/sistemo/internal/errors"
 )
 
 // safeIDPattern matches alphanumeric IDs with hyphens, underscores, and dots.
@@ -40,18 +37,4 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// writeSistemoError writes a structured error response from any error value.
-// If the error is (or wraps) a *SistemoError, the response includes the error
-// code and derives the HTTP status automatically. Otherwise it falls back to
-// a plain {"error":"msg"} response using the provided status.
-func writeSistemoError(w http.ResponseWriter, status int, err error) {
-	var se *sisterr.SistemoError
-	if errors.As(err, &se) {
-		writeJSON(w, se.ToHTTPStatus(), map[string]string{
-			"error": se.Message,
-			"code":  string(se.Code),
-		})
-		return
-	}
-	writeError(w, status, err.Error())
-}
+

@@ -118,7 +118,7 @@ func runNetworkCreate(logger *zap.Logger, database *sql.DB, name, subnet string)
 		return fmt.Errorf("invalid network name %q", name)
 	}
 	for _, c := range name {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' {
 			return fmt.Errorf("network name must contain only letters, numbers, hyphens, and underscores")
 		}
 	}

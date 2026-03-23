@@ -93,10 +93,10 @@ func (h *Dashboard) Dashboard(w http.ResponseWriter, r *http.Request) {
 				ipStr = "-"
 			}
 			termLink := fmt.Sprintf("/terminals/vm/%s", idStr)
-			sb.WriteString(fmt.Sprintf(
+			fmt.Fprintf(&sb,
 				"    <tr><td>%s</td><td>%s</td><td class=\"status %s\">%s</td><td>%s</td><td>%s</td><td><a href=\"%s\">Open</a></td></tr>\n",
 				escapeHTML(idStr), escapeHTML(nameStr), strings.ToLower(statusStr), escapeHTML(statusStr), escapeHTML(imageStr), escapeHTML(ipStr), termLink,
-			))
+			)
 		}
 	}
 
