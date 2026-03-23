@@ -21,6 +21,10 @@ func NewRouter(cfg *config.Config, mgr *vm.Manager, logger *zap.Logger, db *sql.
 	// Global middleware
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
+	if cfg.RateLimitRPS > 0 {
+		rl := agentmw.NewIPRateLimiter(float64(cfg.RateLimitRPS), cfg.RateLimitBurst)
+		r.Use(rl.Middleware())
+	}
 	r.Use(agentmw.Logger(logger))
 	r.Use(middleware.Recoverer)
 

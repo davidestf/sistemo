@@ -118,7 +118,7 @@ func runNetworkCreate(logger *zap.Logger, database *sql.DB, name, subnet string)
 		return fmt.Errorf("invalid network name %q", name)
 	}
 	for _, c := range name {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' {
 			return fmt.Errorf("network name must contain only letters, numbers, hyphens, and underscores")
 		}
 	}
@@ -200,12 +200,16 @@ func runNetworkList(database *sql.DB) {
 
 	// Count VMs on default network
 	var defaultCount int
-	database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id IS NULL AND status NOT IN ('deleted')").Scan(&defaultCount)
+	if err := database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id IS NULL AND status NOT IN ('deleted')").Scan(&defaultCount); err != nil {
+		defaultCount = 0
+	}
 	fmt.Fprintf(tw, "default\t10.200.0.0/16\tsistemo0\t%d\n", defaultCount)
 
 	for _, n := range nets {
 		var vmCount int
-		database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = (SELECT id FROM network WHERE name = ?) AND status NOT IN ('deleted')", n.name).Scan(&vmCount)
+		if err := database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = (SELECT id FROM network WHERE name = ?) AND status NOT IN ('deleted')", n.name).Scan(&vmCount); err != nil {
+			vmCount = 0
+		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n", n.name, n.subnet, n.bridge, vmCount)
 	}
 	tw.Flush()
@@ -227,7 +231,9 @@ func runNetworkDelete(logger *zap.Logger, database *sql.DB, name string) error {
 
 	// Check for running VMs
 	var vmCount int
-	database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = ? AND status NOT IN ('deleted')", id).Scan(&vmCount)
+	if err := database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = ? AND status NOT IN ('deleted')", id).Scan(&vmCount); err != nil {
+		return fmt.Errorf("check VMs on network: %w", err)
+	}
 	if vmCount > 0 {
 		return fmt.Errorf("network %q has %d VMs — delete or move them first", name, vmCount)
 	}

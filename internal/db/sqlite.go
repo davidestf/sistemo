@@ -86,7 +86,9 @@ func saveNetworkIDs(db *sql.DB) map[string]string {
 // restoreNetworkIDs writes saved network_id values back after a table rebuild.
 func restoreNetworkIDs(db *sql.DB, m map[string]string) {
 	for id, netID := range m {
-		db.Exec("UPDATE vm SET network_id = ? WHERE id = ?", netID, id)
+		if _, err := db.Exec("UPDATE vm SET network_id = ? WHERE id = ?", netID, id); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to restore network_id for VM %s: %v\n", id, err)
+		}
 	}
 }
 
@@ -112,7 +114,9 @@ func addColumnIfMissing(db *sql.DB, table, column, colType string) {
 			return // column already exists
 		}
 	}
-	db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, colType))
+	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, colType)); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to add column %s.%s: %v\n", table, column, err)
+	}
 }
 
 func runMigrations(db *sql.DB) error {

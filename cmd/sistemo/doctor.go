@@ -232,12 +232,18 @@ func checkDatabase(dataDir string) checkResult {
 	defer db.Close()
 
 	var vmCount, portCount int
-	db.QueryRow("SELECT COUNT(*) FROM vm WHERE status NOT IN ('deleted')").Scan(&vmCount)
-	db.QueryRow("SELECT COUNT(*) FROM port_rule").Scan(&portCount)
+	if err := db.QueryRow("SELECT COUNT(*) FROM vm WHERE status NOT IN ('deleted')").Scan(&vmCount); err != nil {
+		return checkResult{name: "database", ok: false, message: fmt.Sprintf("query VMs: %v", err)}
+	}
+	if err := db.QueryRow("SELECT COUNT(*) FROM port_rule").Scan(&portCount); err != nil {
+		portCount = 0
+	}
 
 	// Check WAL mode
 	var journalMode string
-	db.QueryRow("PRAGMA journal_mode").Scan(&journalMode)
+	if err := db.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		journalMode = "unknown"
+	}
 
 	return checkResult{name: "database", ok: true,
 		message: fmt.Sprintf("SQLite database healthy (%s mode, %d VMs, %d port rules)", journalMode, vmCount, portCount)}

@@ -17,7 +17,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/davidestf/sistemo/internal/agent/config"
-	"github.com/davidestf/sistemo/internal/agent/network"
 	"github.com/davidestf/sistemo/internal/agent/vm"
 	"github.com/davidestf/sistemo/internal/db"
 	"go.uber.org/zap"
@@ -214,9 +213,10 @@ func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Mark as error — needs user attention. User can retry delete or inspect.
 		if h.db != nil {
-			db.SafeExec(h.db, "UPDATE vm SET status = 'error', maintenance_operation = NULL, error_message = ?, last_state_change = ? WHERE id = ?",
-				err.Error(), now, vmID)
+			db.SafeExec(h.db, "UPDATE vm SET status = 'error', maintenance_operation = NULL, last_state_change = ? WHERE id = ?",
+				now, vmID)
 		}
+		db.LogAction(h.db, "delete", "vm", vmID, "", err.Error(), false)
 		h.logger.Error("delete VM failed", zap.String("vm_id", vmID), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -283,6 +283,7 @@ func (h *VM) Start(w http.ResponseWriter, r *http.Request) {
 		if h.db != nil {
 			db.SafeExec(h.db, "UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?", now, vmID)
 		}
+		db.LogAction(h.db, "start", "vm", vmID, "", err.Error(), false)
 		h.logger.Error("start VM failed", zap.String("vm_id", vmID), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -331,10 +332,12 @@ func (h *VM) Exec(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.mgr.Exec(r.Context(), vmID, body.Script, body.TimeoutSec)
 	if err != nil {
+		db.LogAction(h.db, "exec", "vm", vmID, "", err.Error(), false)
 		h.logger.Error("exec failed", zap.String("vm_id", vmID), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	db.LogAction(h.db, "exec", "vm", vmID, "", "", true)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -396,11 +399,6 @@ func (h *VM) Expose(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Protocol != "tcp" && req.Protocol != "udp" {
 		writeError(w, http.StatusBadRequest, "protocol must be tcp or udp")
-		return
-	}
-
-	if !network.IsPortAvailable(req.HostPort, req.Protocol) {
-		writeError(w, http.StatusConflict, fmt.Sprintf("host port %d/%s is already in use", req.HostPort, req.Protocol))
 		return
 	}
 
