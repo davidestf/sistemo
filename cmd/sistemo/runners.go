@@ -714,6 +714,10 @@ func runList(logger *zap.Logger, database *sql.DB) error {
 		})
 	}
 	if len(rowsData) == 0 {
+		if isJSON() {
+			printJSON([]interface{}{})
+			return nil
+		}
 		fmt.Println("No VMs. Deploy one with: sistemo vm deploy <image>")
 		return nil
 	}
@@ -731,6 +735,23 @@ func runList(logger *zap.Logger, database *sql.DB) error {
 		}
 	}
 
+	if isJSON() {
+		var result []map[string]interface{}
+		for _, r := range rowsData {
+			result = append(result, map[string]interface{}{
+				"id":      r.id,
+				"name":    r.name,
+				"status":  r.status,
+				"image":   r.image,
+				"ip":      r.ip,
+				"network": r.network,
+				"volumes": volCounts[r.id],
+			})
+		}
+		printJSON(result)
+		return nil
+	}
+
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tNAME\tSTATUS\tIMAGE\tIP\tNETWORK\tVOLUMES")
 	for _, r := range rowsData {
@@ -739,7 +760,7 @@ func runList(logger *zap.Logger, database *sql.DB) error {
 		if vc > 0 {
 			volStr = fmt.Sprintf("%d", vc)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.id, r.name, r.status, r.image, r.ip, r.network, volStr)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", r.id, r.name, colorStatus(r.status), r.image, r.ip, r.network, volStr)
 	}
 	tw.Flush()
 	return nil
@@ -860,8 +881,8 @@ func resolveImage(logger *zap.Logger, dataDir, image string) (string, error) {
 	return dest, nil
 }
 
-func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memoryMB, storageMB int, attachPaths []string, nameOverride string, exposePorts []string, networkName string) error {
-	if !filepath.IsAbs(image) && !strings.HasPrefix(image, "http://") && !strings.HasPrefix(image, "https://") {
+func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memoryMB, storageMB int, attachPaths []string, nameOverride string, exposePorts []string, networkName string, rootVolume string) error {
+	if image != "" && !filepath.IsAbs(image) && !strings.HasPrefix(image, "http://") && !strings.HasPrefix(image, "https://") {
 		if abs, err := filepath.Abs(image); err == nil {
 			if _, err := os.Stat(abs); err == nil {
 				image = abs
@@ -902,6 +923,7 @@ func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memory
 		VCPUs:           vcpus,
 		MemoryMB:        memoryMB,
 		StorageMB:       storageMB,
+		RootVolume:      rootVolume,
 		AttachedStorage: attachPaths,
 		InjectInitSSH:   true,
 		NetworkBridge:   networkBridge,
@@ -1368,55 +1390,90 @@ func runStatus(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	if err := row.Scan(&id, &name, &status, &image, &ip, &ns, &created, &networkID); err != nil {
 		return fmt.Errorf("lookup vm details: %w", err)
 	}
+
+	// Resolve network name
+	netName := "default"
+	if networkID.Valid && networkID.String != "" {
+		var nn string
+		if database.QueryRow("SELECT name FROM network WHERE id = ?", networkID.String).Scan(&nn) == nil {
+			netName = nn
+		}
+	}
+
+	// Collect volumes
+	type volInfo struct {
+		Name string `json:"name"`
+		Role string `json:"role"`
+		Size int    `json:"size_mb"`
+		Path string `json:"path"`
+	}
+	var volumes []volInfo
+	volRows, err := database.Query("SELECT name, size_mb, role, path FROM volume WHERE attached = ?", id.String)
+	if err == nil {
+		defer volRows.Close()
+		for volRows.Next() {
+			var v volInfo
+			if volRows.Scan(&v.Name, &v.Size, &v.Role, &v.Path) == nil {
+				volumes = append(volumes, v)
+			}
+		}
+	}
+
+	// Collect ports
+	type portInfo struct {
+		HostPort int    `json:"host_port"`
+		VMPort   int    `json:"vm_port"`
+		Protocol string `json:"protocol"`
+	}
+	var ports []portInfo
+	portRows, err := database.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", id.String)
+	if err == nil {
+		defer portRows.Close()
+		for portRows.Next() {
+			var p portInfo
+			if portRows.Scan(&p.HostPort, &p.VMPort, &p.Protocol) == nil {
+				ports = append(ports, p)
+			}
+		}
+	}
+
+	if isJSON() {
+		result := map[string]interface{}{
+			"id":        id.String,
+			"name":      name.String,
+			"status":    status.String,
+			"image":     image.String,
+			"ip":        ip.String,
+			"namespace": ns.String,
+			"created":   created.String,
+			"network":   netName,
+			"volumes":   volumes,
+			"ports":     ports,
+		}
+		printJSON(result)
+		return nil
+	}
+
 	fmt.Printf("ID:        %s\n", id.String)
 	fmt.Printf("Name:      %s\n", name.String)
-	fmt.Printf("Status:    %s\n", status.String)
+	fmt.Printf("Status:    %s\n", colorStatus(status.String))
 	fmt.Printf("Image:     %s\n", image.String)
 	fmt.Printf("IP:        %s\n", ip.String)
 	fmt.Printf("Namespace: %s\n", ns.String)
 	fmt.Printf("Created:   %s\n", created.String)
-	if networkID.Valid && networkID.String != "" {
-		var netName string
-		if database.QueryRow("SELECT name FROM network WHERE id = ?", networkID.String).Scan(&netName) == nil {
-			fmt.Printf("Network:   %s\n", netName)
-		}
-	} else {
-		fmt.Printf("Network:   default\n")
-	}
+	fmt.Printf("Network:   %s\n", netName)
 
-	// Show attached volumes
-	volRows, err := database.Query("SELECT name, size_mb, role, path FROM volume WHERE attached = ?", id.String)
-	if err == nil {
-		defer volRows.Close()
-		first := true
-		for volRows.Next() {
-			var vName, vRole, vPath string
-			var vSize int
-			if volRows.Scan(&vName, &vSize, &vRole, &vPath) == nil {
-				if first {
-					fmt.Printf("Volumes:\n")
-					first = false
-				}
-				fmt.Printf("  %s (%s, %d MB) %s\n", vName, vRole, vSize, vPath)
-			}
+	if len(volumes) > 0 {
+		fmt.Printf("Volumes:\n")
+		for _, v := range volumes {
+			fmt.Printf("  %s (%s, %d MB) %s\n", v.Name, v.Role, v.Size, v.Path)
 		}
 	}
 
-	// Show exposed ports
-	portRows, err := database.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", id.String)
-	if err == nil {
-		defer portRows.Close()
-		first := true
-		for portRows.Next() {
-			var hp, vp int
-			var proto string
-			if portRows.Scan(&hp, &vp, &proto) == nil {
-				if first {
-					fmt.Printf("Ports:\n")
-					first = false
-				}
-				fmt.Printf("  host:%d → VM:%d (%s)\n", hp, vp, proto)
-			}
+	if len(ports) > 0 {
+		fmt.Printf("Ports:\n")
+		for _, p := range ports {
+			fmt.Printf("  host:%d → VM:%d (%s)\n", p.HostPort, p.VMPort, p.Protocol)
 		}
 	}
 	return nil
@@ -1524,7 +1581,15 @@ func runStorageList(logger *zap.Logger) error {
 		return fmt.Errorf("list volumes: %w", err)
 	}
 	if len(list) == 0 {
+		if isJSON() {
+			printJSON([]interface{}{})
+			return nil
+		}
 		fmt.Println("No volumes. Create one with: sistemo volume create <size_mb> [--name=myvol]")
+		return nil
+	}
+	if isJSON() {
+		printJSON(list)
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -1534,7 +1599,7 @@ func runStorageList(logger *zap.Logger) error {
 		if attached == "" {
 			attached = "(none)"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d MB\t%s\t%s\n", v.ID, v.Name, v.SizeMB, v.Status, attached)
+		fmt.Fprintf(tw, "%s\t%s\t%d MB\t%s\t%s\n", v.ID, v.Name, v.SizeMB, colorStatus(v.Status), attached)
 	}
 	tw.Flush()
 	return nil
@@ -1549,6 +1614,33 @@ func runStorageDelete(logger *zap.Logger, idOrName string) error {
 		return fmt.Errorf("delete volume: %w", err)
 	}
 	fmt.Printf("Deleted volume %s\n", idOrName)
+	return nil
+}
+
+func runStorageShow(logger *zap.Logger, idOrName string) error {
+	baseURL := daemon.URL()
+	if err := daemon.Health(baseURL); err != nil {
+		return fmt.Errorf("daemon not reachable: %w", err)
+	}
+	vol, err := daemon.GetVolume(baseURL, idOrName)
+	if err != nil {
+		return fmt.Errorf("get volume: %w", err)
+	}
+	if isJSON() {
+		printJSON(vol)
+		return nil
+	}
+	fmt.Printf("ID:         %s\n", vol.ID)
+	fmt.Printf("Name:       %s\n", vol.Name)
+	fmt.Printf("Size:       %d MB\n", vol.SizeMB)
+	fmt.Printf("Status:     %s\n", colorStatus(vol.Status))
+	fmt.Printf("Path:       %s\n", vol.Path)
+	if vol.Attached != "" {
+		fmt.Printf("Attached:   %s\n", vol.Attached)
+	}
+	if vol.Created != "" {
+		fmt.Printf("Created:    %s\n", vol.Created)
+	}
 	return nil
 }
 

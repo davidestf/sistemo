@@ -40,6 +40,7 @@ type createVMRequest struct {
 	VCPUs           int               `json:"vcpus"`
 	MemoryMB        int               `json:"memory_mb"`
 	StorageMB       int               `json:"storage_mb,omitempty"`
+	RootVolume      string            `json:"root_volume,omitempty"`
 	Metadata        map[string]string `json:"metadata,omitempty"`
 	AttachedStorage []string          `json:"attached_storage,omitempty"`
 	InjectInitSSH   bool              `json:"inject_init_ssh,omitempty"`
@@ -62,8 +63,8 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if strings.TrimSpace(req.Image) == "" {
-		writeError(w, http.StatusBadRequest, "image is required")
+	if strings.TrimSpace(req.Image) == "" && strings.TrimSpace(req.RootVolume) == "" {
+		writeError(w, http.StatusBadRequest, "image or root_volume is required")
 		return
 	}
 
@@ -129,12 +130,16 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Insert DB record before creating VM
+	imageForDB := req.Image
+	if imageForDB == "" && req.RootVolume != "" {
+		imageForDB = "volume:" + req.RootVolume
+	}
 	if h.db != nil {
 		now := time.Now().UTC().Format(time.RFC3339)
 		_, err := h.db.Exec(
 			`INSERT INTO vm (id, name, status, maintenance_operation, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
 			 VALUES (?, ?, 'maintenance', 'creating', ?, ?, ?, ?, ?, ?)`,
-			vmid, name, req.Image, effectiveVCPUs, effectiveMemoryMB, req.StorageMB, now, now,
+			vmid, name, imageForDB, effectiveVCPUs, effectiveMemoryMB, req.StorageMB, now, now,
 		)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE constraint failed: vm.name") {
@@ -146,14 +151,45 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Create root volume record before VM creation
+	// Root volume: either use an existing volume (--volume) or create a new one
 	now := time.Now().UTC().Format(time.RFC3339)
-	rootVolID := uuid.NewString()
-	rootVolName := name + "-root"
-	volumesDir := filepath.Join(filepath.Dir(h.cfg.VMBaseDir), "volumes")
+	rootVolID := ""
 	rootVolPath := ""
-	effectiveStorageMB := req.StorageMB
-	if h.db != nil {
+	volumesDir := filepath.Join(filepath.Dir(h.cfg.VMBaseDir), "volumes")
+	useExistingVolume := strings.TrimSpace(req.RootVolume) != ""
+
+	if useExistingVolume && h.db != nil {
+		// Boot from existing volume — look it up
+		var volStatus string
+		err := h.db.QueryRow(
+			"SELECT id, path, status FROM volume WHERE (id = ? OR name = ?) LIMIT 1",
+			req.RootVolume, req.RootVolume,
+		).Scan(&rootVolID, &rootVolPath, &volStatus)
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("volume %q not found", req.RootVolume))
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("query volume: %v", err))
+			return
+		}
+		if volStatus != "online" {
+			writeError(w, http.StatusConflict, fmt.Sprintf("volume %q is %s, must be online", req.RootVolume, volStatus))
+			return
+		}
+		// Verify the volume file actually exists on disk
+		if _, err := os.Stat(rootVolPath); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("volume file missing on disk: %s", rootVolPath))
+			return
+		}
+		// Mark as attached to this VM
+		db.SafeExec(h.db, "UPDATE volume SET status='maintenance', attached=?, role='root', last_state_change=? WHERE id=?",
+			vmid, now, rootVolID)
+	} else if h.db != nil {
+		// Create a new root volume
+		rootVolID = uuid.NewString()
+		rootVolName := name + "-root"
+		effectiveStorageMB := req.StorageMB
 		if err := os.MkdirAll(volumesDir, 0755); err != nil {
 			h.logger.Error("create volumes dir failed", zap.Error(err))
 			writeError(w, http.StatusInternalServerError, "failed to create volumes directory")
@@ -166,23 +202,30 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 			rootVolID, rootVolName, effectiveStorageMB, rootVolPath, vmid, now,
 		)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("insert root volume: %v", err))
+			// Clean up the VM record we already inserted
+			h.db.Exec("DELETE FROM vm WHERE id=?", vmid)
+			if strings.Contains(err.Error(), "UNIQUE constraint failed: volume.name") {
+				writeError(w, http.StatusConflict, fmt.Sprintf("A volume named %q already exists. Delete it first or use a different VM name.", rootVolName))
+			} else {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("insert root volume: %v", err))
+			}
 			return
 		}
 	}
 
 	createReq := &vm.CreateRequest{
-		VMID:            vmid,
-		Image:           req.Image,
-		VCPUs:           effectiveVCPUs,
-		MemoryMB:        effectiveMemoryMB,
-		StorageMB:       req.StorageMB,
-		RootVolumePath:  rootVolPath,
-		AttachedStorage: req.AttachedStorage,
-		Metadata:        req.Metadata,
-		InjectInitSSH:   req.InjectInitSSH,
-		NetworkBridge:   req.NetworkBridge,
-		NetworkSubnet:   req.NetworkSubnet,
+		VMID:              vmid,
+		Image:             req.Image,
+		VCPUs:             effectiveVCPUs,
+		MemoryMB:          effectiveMemoryMB,
+		StorageMB:         req.StorageMB,
+		RootVolumePath:    rootVolPath,
+		UseExistingVolume: useExistingVolume,
+		AttachedStorage:   req.AttachedStorage,
+		Metadata:          req.Metadata,
+		InjectInitSSH:     req.InjectInitSSH,
+		NetworkBridge:     req.NetworkBridge,
+		NetworkSubnet:     req.NetworkSubnet,
 	}
 
 	// Resolve attached storage: look up volumes by ID or name in DB,
@@ -200,7 +243,11 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 				// Not in DB — try as raw filesystem path for backward compat
 				if _, statErr := os.Stat(idOrName); statErr != nil {
 					// Clean up root volume on early return
-					h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
+					if useExistingVolume {
+						db.SafeExec(h.db, "UPDATE volume SET status='online', attached=NULL, last_state_change=? WHERE id=?", now, rootVolID)
+					} else {
+						h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
+					}
 					writeError(w, http.StatusNotFound, fmt.Sprintf("volume %q not found in database and path does not exist", idOrName))
 					return
 				}
@@ -208,12 +255,20 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if err != nil {
-				h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
+				if useExistingVolume {
+					db.SafeExec(h.db, "UPDATE volume SET status='online', attached=NULL, last_state_change=? WHERE id=?", now, rootVolID)
+				} else {
+					h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
+				}
 				writeError(w, http.StatusInternalServerError, fmt.Sprintf("query volume %q: %v", idOrName, err))
 				return
 			}
 			if volStatus != "online" {
-				h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
+				if useExistingVolume {
+					db.SafeExec(h.db, "UPDATE volume SET status='online', attached=NULL, last_state_change=? WHERE id=?", now, rootVolID)
+				} else {
+					h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
+				}
 				writeError(w, http.StatusConflict, fmt.Sprintf("volume %q is already attached", idOrName))
 				return
 			}
@@ -221,6 +276,12 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 			attachedVolumeIDs = append(attachedVolumeIDs, volID)
 		}
 		createReq.AttachedStorage = resolvedPaths
+	}
+
+	// Mark data volumes as maintenance to prevent races during VM creation
+	for _, volID := range attachedVolumeIDs {
+		db.SafeExec(h.db, "UPDATE volume SET status='maintenance', attached=?, last_state_change=? WHERE id=?",
+			vmid, now, volID)
 	}
 
 	result, err := h.mgr.Create(r.Context(), createReq)
@@ -231,9 +292,13 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 			db.SafeExec(h.db, `DELETE FROM port_rule WHERE vm_id = ?`, vmid)
 			db.SafeExec(h.db, `DELETE FROM vm WHERE id = ?`, vmid)
 			// Clean up root volume record and file
-			h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
-			if rootVolPath != "" {
-				os.Remove(rootVolPath)
+			if useExistingVolume {
+				db.SafeExec(h.db, "UPDATE volume SET status='online', attached=NULL, last_state_change=? WHERE id=?", now, rootVolID)
+			} else {
+				h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
+				if rootVolPath != "" {
+					os.Remove(rootVolPath)
+				}
 			}
 		}
 		// Reset any volumes we were about to attach
@@ -317,6 +382,9 @@ func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
 		if h.db != nil {
 			db.SafeExec(h.db, "UPDATE vm SET status = 'error', maintenance_operation = NULL, last_state_change = ? WHERE id = ?",
 				now, vmID)
+			// Also reset any data volumes attached to this VM
+			db.SafeExec(h.db, "UPDATE volume SET status='online', attached=NULL, last_state_change=? WHERE attached=? AND role='data'",
+				now, vmID)
 		}
 		db.LogAction(h.db, "delete", "vm", vmID, "", err.Error(), false)
 		h.logger.Error("delete VM failed", zap.String("vm_id", vmID), zap.Error(err))
@@ -324,15 +392,21 @@ func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle root volume DB record
+	// Handle root volume DB record — only if still attached to this VM.
+	// If user already detached it, leave it alone (it belongs to them now).
 	if h.db != nil && rootVolID.Valid {
-		if !preserveStorage {
+		var volAttached sql.NullString
+		h.db.QueryRow("SELECT attached FROM volume WHERE id=?", rootVolID.String).Scan(&volAttached)
+		stillAttached := volAttached.Valid && volAttached.String == vmID
+
+		if stillAttached && !preserveStorage {
 			// Delete root volume record — the file was already removed by deleteVM
 			db.SafeExec(h.db, "DELETE FROM volume WHERE id=?", rootVolID.String)
-		} else {
+		} else if stillAttached && preserveStorage {
 			// Detach but keep volume available for re-use
 			db.SafeExec(h.db, "UPDATE volume SET status='online', attached=NULL, last_state_change=? WHERE id=?", now, rootVolID.String)
 		}
+		// If not attached (user already detached): do nothing — volume is independent
 	}
 
 	// Release all non-root data volumes attached to this VM

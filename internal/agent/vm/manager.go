@@ -113,6 +113,17 @@ func (m *Manager) reconcile() {
 				lock.Unlock()
 				continue // VM was restarted, skip cleanup
 			}
+			// Also check if a delete is already in progress (or completed)
+			if m.db != nil {
+				var dbStatus string
+				if m.db.QueryRow("SELECT status FROM vm WHERE id=?", vmID).Scan(&dbStatus) == nil {
+					if dbStatus == "deleted" || dbStatus == "maintenance" {
+						lock.Unlock()
+						m.unregisterVM(vmID)
+						continue // Delete in progress or done, skip reconciler cleanup
+					}
+				}
+			}
 
 			m.logger.Warn("reconciler: VM process dead, cleaning up",
 				zap.String("vm_id", vmID), zap.Int("pid", info.PID))

@@ -65,6 +65,7 @@ type CreateVMRequest struct {
 	VCPUs           int      `json:"vcpus"`
 	MemoryMB        int      `json:"memory_mb"`
 	StorageMB       int      `json:"storage_mb,omitempty"`
+	RootVolume      string   `json:"root_volume,omitempty"`
 	AttachedStorage []string `json:"attached_storage,omitempty"`
 	InjectInitSSH   bool     `json:"inject_init_ssh,omitempty"`
 	NetworkBridge   string   `json:"network_bridge,omitempty"`
@@ -315,6 +316,7 @@ type VolumeResponse struct {
 	SizeMB          int    `json:"size_mb"`
 	Path            string `json:"path"`
 	Status          string `json:"status"`
+	Role            string `json:"role,omitempty"`
 	Attached        string `json:"attached,omitempty"`
 	Created         string `json:"created,omitempty"`
 	LastStateChange string `json:"last_state_change,omitempty"`

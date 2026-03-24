@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -44,6 +45,10 @@ func (h *Volume) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "size_mb is required and must be positive")
 		return
 	}
+	if req.SizeMB > 102400 { // 100GB max per volume
+		writeError(w, http.StatusBadRequest, "volume size cannot exceed 100 GB (102400 MB)")
+		return
+	}
 	if req.Role == "" {
 		req.Role = "data"
 	}
@@ -65,6 +70,16 @@ func (h *Volume) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	volPath := filepath.Join(h.dataDir, id+".ext4")
+
+	// Check available disk space before creating
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(h.dataDir, &stat); err == nil {
+		freeMB := int64(stat.Bavail) * int64(stat.Bsize) / (1024 * 1024)
+		if freeMB < int64(req.SizeMB)+512 { // 512MB headroom
+			writeError(w, http.StatusInsufficientStorage, fmt.Sprintf("insufficient disk space: %d MB free, need %d MB", freeMB, req.SizeMB))
+			return
+		}
+	}
 
 	// Truncate file to the requested size.
 	f, err := os.Create(volPath)
@@ -229,9 +244,10 @@ func (h *Volume) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete from DB.
+	// File gone (or never existed) — safe to remove DB record
 	if _, err := h.db.Exec("DELETE FROM volume WHERE id = ?", id); err != nil {
-		h.logger.Error("delete volume record failed", zap.Error(err))
+		// File already removed but DB delete failed — log warning
+		h.logger.Error("delete volume DB record failed (file already removed)", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "failed to delete volume record")
 		return
 	}
@@ -283,10 +299,22 @@ func (h *Volume) Resize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fix 6: Guard maintenance state — cannot resize while another operation is in progress
+	if volStatus == "maintenance" {
+		writeError(w, http.StatusConflict, "volume is in maintenance — wait for the current operation to complete")
+		return
+	}
+
 	// Must not be attached to a running VM.
 	if attached != nil && *attached != "" {
 		var vmStatus string
-		if h.db.QueryRow("SELECT status FROM vm WHERE id = ?", *attached).Scan(&vmStatus) == nil && vmStatus == "running" {
+		err := h.db.QueryRow("SELECT status FROM vm WHERE id = ?", *attached).Scan(&vmStatus)
+		if err != nil && err != sql.ErrNoRows {
+			h.logger.Error("failed to check VM status for resize", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to verify VM status")
+			return
+		}
+		if err == nil && vmStatus == "running" {
 			writeError(w, http.StatusConflict, "stop the VM first — cannot resize while running")
 			return
 		}
@@ -372,11 +400,11 @@ func (h *Volume) Attach(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Look up volume.
-	var volID, volName, volStatus string
+	var volID, volName, volStatus, volRole string
 	err := h.db.QueryRow(
-		"SELECT id, name, status FROM volume WHERE id = ? OR name = ?",
+		"SELECT id, name, status, role FROM volume WHERE id = ? OR name = ?",
 		req.Volume, req.Volume,
-	).Scan(&volID, &volName, &volStatus)
+	).Scan(&volID, &volName, &volStatus, &volRole)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "volume not found")
 		return
@@ -386,8 +414,10 @@ func (h *Volume) Attach(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to look up volume")
 		return
 	}
-	if volStatus != "online" {
-		writeError(w, http.StatusConflict, fmt.Sprintf("volume status is %q, must be online to attach", volStatus))
+
+	// Fix 5: Role enforcement — cannot attach root volumes via attach API
+	if volRole == "root" {
+		writeError(w, http.StatusConflict, "cannot attach a root volume — use --volume flag on deploy instead")
 		return
 	}
 
@@ -411,13 +441,19 @@ func (h *Volume) Attach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update volume.
-	if _, err := h.db.Exec(
-		"UPDATE volume SET status='attached', attached=?, last_state_change=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+	// Fix 2: Atomic attach — single UPDATE with WHERE clause prevents TOCTOU race
+	result, err := h.db.Exec(
+		"UPDATE volume SET status='attached', attached=?, last_state_change=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status='online'",
 		vmID, volID,
-	); err != nil {
+	)
+	if err != nil {
 		h.logger.Error("attach volume update failed", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "failed to attach volume")
+		return
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		writeError(w, http.StatusConflict, "volume is not available (may already be attached)")
 		return
 	}
 
@@ -483,13 +519,19 @@ func (h *Volume) Detach(w http.ResponseWriter, r *http.Request) {
 		// If VM not found or deleted, allow detach to proceed.
 	}
 
-	// Update volume.
-	if _, err := h.db.Exec(
-		"UPDATE volume SET status='online', attached=NULL, last_state_change=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+	// Fix 2: Atomic detach — single UPDATE with WHERE clause prevents TOCTOU race
+	detachResult, err := h.db.Exec(
+		"UPDATE volume SET status='online', attached=NULL, last_state_change=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status='attached'",
 		volID,
-	); err != nil {
+	)
+	if err != nil {
 		h.logger.Error("detach volume update failed", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "failed to detach volume")
+		return
+	}
+	detachRows, _ := detachResult.RowsAffected()
+	if detachRows == 0 {
+		writeError(w, http.StatusConflict, "volume is not attached (state may have changed)")
 		return
 	}
 

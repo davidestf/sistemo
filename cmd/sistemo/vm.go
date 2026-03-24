@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -50,13 +51,15 @@ func vmCmd() *cobra.Command {
 	cmd.AddCommand(vmSSHCmd())
 	cmd.AddCommand(vmExposeCmd())
 	cmd.AddCommand(vmUnexposeCmd())
+	cmd.AddCommand(vmVolumeCmd())
 	return cmd
 }
 
 func vmListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List VMs",
+		Use:     "list",
+		Aliases: []string{"ls"},
+		Short:   "List VMs",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runList(getLogger(cmd), getDBFromCmd(cmd))
 		},
@@ -70,10 +73,11 @@ func vmDeployCmd() *cobra.Command {
 	var name string
 	var expose []string
 	var networkName string
+	var rootVolume string
 	cmd := &cobra.Command{
-		Use:   "deploy <image> [flags]",
+		Use:   "deploy [image] [flags]",
 		Short: "Deploy a VM",
-		Long: `Deploy a VM from an image name, file path, or URL.
+		Long: `Deploy a VM from an image name, file path, URL, or existing volume.
 
 Sistemo resolves the image argument in this order:
   1. HTTP/HTTPS URL (downloaded by daemon)
@@ -81,21 +85,32 @@ Sistemo resolves the image argument in this order:
   3. Cached image in ~/.sistemo/images/
   4. Download from registry (registry.sistemo.io)
 
+Use --volume to boot from an existing volume (no image needed):
+  sistemo vm deploy --volume mydata --name restored
+
 Override the default registry with SISTEMO_REGISTRY_URL.
 
 Examples:
-  sistemo vm deploy debian                          # auto-downloads if not cached
-  sistemo vm deploy ./custom.rootfs.ext4            # local file
-  sistemo vm deploy https://example.com/vm.ext4     # URL
+  sistemo vm deploy debian                              # auto-downloads if not cached
+  sistemo vm deploy ./custom.rootfs.ext4                # local file
+  sistemo vm deploy https://example.com/vm.ext4         # URL
   sistemo vm deploy debian --name dev --vcpus 4 --memory 2G
   sistemo vm deploy nginx --expose 80
-  sistemo vm deploy myapp --expose 8080:3000
-  sistemo vm deploy postgres --network backend`,
-		Args: cobra.ExactArgs(1),
+  sistemo vm deploy --volume web-root --name web2       # boot from existing volume`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := getLogger(cmd)
 			dataDir := getDataDirFromCmd(cmd)
-			imageArg := args[0]
+
+			var imageArg string
+			if len(args) > 0 {
+				imageArg = args[0]
+			}
+
+			if imageArg == "" && rootVolume == "" {
+				return fmt.Errorf("provide an image name or --volume to boot from an existing volume")
+			}
+
 			memoryMB, err := parseSizeMB(memoryStr)
 			if err != nil {
 				return err
@@ -105,9 +120,11 @@ Examples:
 				return err
 			}
 
-			imageArg, err = resolveImage(logger, dataDir, imageArg)
-			if err != nil {
-				return err
+			if imageArg != "" {
+				imageArg, err = resolveImage(logger, dataDir, imageArg)
+				if err != nil {
+					return err
+				}
 			}
 
 			var attachVolumes []string
@@ -120,7 +137,7 @@ Examples:
 					attachVolumes = append(attachVolumes, idOrName)
 				}
 			}
-			return runDeploy(getLogger(cmd), getDBFromCmd(cmd), imageArg, vcpus, memoryMB, storageMB, attachVolumes, name, expose, networkName)
+			return runDeploy(getLogger(cmd), getDBFromCmd(cmd), imageArg, vcpus, memoryMB, storageMB, attachVolumes, name, expose, networkName, rootVolume)
 		},
 	}
 	cmd.Flags().IntVar(&vcpus, "vcpus", 2, "number of vCPUs")
@@ -130,21 +147,29 @@ Examples:
 	cmd.Flags().StringVar(&name, "name", "", "VM name (default: derived from image)")
 	cmd.Flags().StringSliceVar(&expose, "expose", nil, "expose ports: hostPort:vmPort or just port (repeatable)")
 	cmd.Flags().StringVar(&networkName, "network", "", "named network to join (default: shared sistemo0 bridge)")
+	cmd.Flags().StringVar(&rootVolume, "volume", "", "boot from an existing volume (skip image cloning)")
 	return cmd
 }
 
 func vmDeleteCmd() *cobra.Command {
 	var preserveStorage bool
+	var skipConfirm bool
 	cmd := &cobra.Command{
 		Use:               "delete <name|id>",
+		Aliases:           []string{"rm", "remove", "destroy"},
 		Short:             "Delete a VM (removes disk unless --preserve-storage)",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: vmNameCompletionFunc,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if !skipConfirm && !confirmAction("delete", args[0]) {
+				fmt.Println("Cancelled.")
+				return nil
+			}
 			return runDelete(getLogger(cmd), getDBFromCmd(cmd), args[0], preserveStorage)
 		},
 	}
 	cmd.Flags().BoolVar(&preserveStorage, "preserve-storage", false, "Keep the root volume after deleting the VM")
+	cmd.Flags().BoolVarP(&skipConfirm, "yes", "y", false, "Skip confirmation prompt")
 	return cmd
 }
 
@@ -199,6 +224,7 @@ func vmTerminalCmd() *cobra.Command {
 func vmStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:               "status <name|id>",
+		Aliases:           []string{"show", "info"},
 		Short:             "Show VM details",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: vmNameCompletionFunc,
