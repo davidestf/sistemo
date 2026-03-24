@@ -615,13 +615,34 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 	drives := []firecracker.Drive{{DriveID: "rootfs", PathOnHost: vmRootfs, IsRootDevice: true, IsReadOnly: false}}
 	driveLetters := []string{"vdb", "vdc", "vdd", "vde", "vdf", "vdg", "vdh"}
 
-	// Re-attach volumes from vm_spec if present
-	if specData, err := os.ReadFile(filepath.Join(vmDir, "vm_spec.json")); err == nil {
-		var spec struct {
-			AttachedStorage []string `json:"attached_storage"`
+	// Re-attach data volumes from DB (attached via API or --attach at deploy)
+	if m.db != nil {
+		volRows, err := m.db.Query(
+			"SELECT path FROM volume WHERE attached = ? AND role != 'root' AND status = 'attached'", vmID)
+		if err == nil {
+			var dbVolPaths []string
+			for volRows.Next() {
+				var p string
+				if volRows.Scan(&p) == nil {
+					dbVolPaths = append(dbVolPaths, p)
+				}
+			}
+			volRows.Close()
+			if len(dbVolPaths) > 0 {
+				drives = appendAttachedStorage(drives, dbVolPaths, driveLetters, m.logger)
+			}
 		}
-		if json.Unmarshal(specData, &spec) == nil {
-			drives = appendAttachedStorage(drives, spec.AttachedStorage, driveLetters, m.logger)
+	}
+
+	// Fallback: also check vm_spec.json for backward compat (old VMs without DB volumes)
+	if m.db == nil {
+		if specData, err := os.ReadFile(filepath.Join(vmDir, "vm_spec.json")); err == nil {
+			var spec struct {
+				AttachedStorage []string `json:"attached_storage"`
+			}
+			if json.Unmarshal(specData, &spec) == nil {
+				drives = appendAttachedStorage(drives, spec.AttachedStorage, driveLetters, m.logger)
+			}
 		}
 	}
 
