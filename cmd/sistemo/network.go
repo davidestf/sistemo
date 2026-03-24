@@ -194,15 +194,39 @@ func runNetworkList(database *sql.DB) {
 		}
 	}
 
-	// Always show default network first
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSUBNET\tBRIDGE\tVMs")
-
 	// Count VMs on default network
 	var defaultCount int
 	if err := database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id IS NULL AND status NOT IN ('deleted')").Scan(&defaultCount); err != nil {
 		defaultCount = 0
 	}
+
+	if isJSON() {
+		var result []map[string]interface{}
+		result = append(result, map[string]interface{}{
+			"name":   "default",
+			"subnet": "10.200.0.0/16",
+			"bridge": "sistemo0",
+			"vms":    defaultCount,
+		})
+		for _, n := range nets {
+			var vmCount int
+			if err := database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = (SELECT id FROM network WHERE name = ?) AND status NOT IN ('deleted')", n.name).Scan(&vmCount); err != nil {
+				vmCount = 0
+			}
+			result = append(result, map[string]interface{}{
+				"name":   n.name,
+				"subnet": n.subnet,
+				"bridge": n.bridge,
+				"vms":    vmCount,
+			})
+		}
+		printJSON(result)
+		return
+	}
+
+	// Always show default network first
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tSUBNET\tBRIDGE\tVMs")
 	fmt.Fprintf(tw, "default\t10.200.0.0/16\tsistemo0\t%d\n", defaultCount)
 
 	for _, n := range nets {

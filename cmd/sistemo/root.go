@@ -44,6 +44,7 @@ func rootCmd() *cobra.Command {
 	}
 	var dataDir string
 	cmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "Data directory (default: ~/.sistemo)")
+	cmd.PersistentFlags().StringVarP(&outputFormat, "output", "o", "text", "Output format: text or json")
 	cmd.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
 		logger := newLogger()
 		dir := getDataDir(dataDir)

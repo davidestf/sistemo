@@ -90,7 +90,28 @@ func runHistory(db *sql.DB, limit int, action, target string) {
 	}
 
 	if len(entries) == 0 {
+		if isJSON() {
+			printJSON([]interface{}{})
+			return
+		}
 		fmt.Println("No history entries.")
+		return
+	}
+
+	if isJSON() {
+		var result []map[string]interface{}
+		for _, e := range entries {
+			result = append(result, map[string]interface{}{
+				"timestamp":   e.timestamp,
+				"action":      e.action,
+				"target_type": e.targetType,
+				"target_name": e.targetName,
+				"target_id":   e.targetID,
+				"details":     e.details,
+				"success":     e.success,
+			})
+		}
+		printJSON(result)
 		return
 	}
 

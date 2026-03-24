@@ -42,6 +42,9 @@ That's it. Real Debian VM, SSH access, full `apt` + `systemctl`. Running on your
 sistemo vm deploy debian
 sistemo vm deploy ubuntu --name dev --vcpus 4 --memory 2G
 
+# Boot from an existing volume (skip image entirely)
+sistemo vm deploy --volume web-root --name web2
+
 # Build from any Docker image (openssh-server auto-installed)
 sudo sistemo image build node:20
 sistemo vm deploy node --name api
@@ -74,9 +77,9 @@ sistemo vm deploy debian --name db --attach=pgdata
 # Resize a volume
 sistemo volume resize mydata 10GB
 
-# Attach/detach volumes at runtime
-sistemo volume attach myvm mydata
-sistemo volume detach myvm mydata
+# Attach/detach volumes on a stopped VM
+sistemo vm volume attach myvm mydata
+sistemo vm volume detach myvm mydata
 
 # Delete a VM but keep its root volume
 sistemo vm delete myvm --preserve-storage
@@ -96,6 +99,8 @@ sudo sistemo doctor
 - **Systemd service** -- `sistemo service install` survives reboots
 - **Health check** -- `sistemo doctor` diagnoses your entire setup
 - **Audit log** -- `sistemo history` shows every operation
+- **JSON output** -- `sistemo vm list -o json` for scripting and automation
+- **Command aliases** -- `ls` for list, `rm` for delete, `show` for status
 - **Shell completions** -- `sistemo completion bash|zsh|fish`
 - **Config validation** -- Bad config? Clear error with fix suggestion
 - **x86_64 + ARM64** -- Intel, AMD, Raspberry Pi 5, Hetzner CAX, Graviton
@@ -138,15 +143,20 @@ sistemo vm deploy <image> [flags]         Create a VM
   --expose PORT                             Expose port (host:vm or just port)
   --network NAME                            Join a named network
   --attach VOLUME                           Attach persistent volume
+  --volume VOLUME                           Boot from an existing volume
 sistemo vm list                           List VMs
+sistemo vm list -o json                   JSON output for scripting
 sistemo vm ssh <name>                     SSH into a VM
 sistemo vm exec <name> <command>          Run a command
 sistemo vm restart|stop|start <name>      Lifecycle
 sistemo vm delete <name>                  Remove a VM
+sistemo vm delete <name> -y               Skip confirmation prompt
   --preserve-storage                        Keep root volume on delete
 sistemo vm status <name>                  Show details
 sistemo vm expose <name> --port P         Expose port at runtime
 sistemo vm unexpose <name> --port P       Remove port expose
+sistemo vm volume attach <vm> <volume>    Attach volume to stopped VM
+sistemo vm volume detach <vm> <volume>    Detach volume from stopped VM
 
 sistemo network create <name>             Create isolated network
 sistemo network list                      List networks
@@ -156,13 +166,20 @@ sistemo volume create <size> [--name=N]   Create persistent volume
 sistemo volume list                       List volumes
 sistemo volume delete <name>              Delete a volume
 sistemo volume resize <name> <size>       Resize a volume
-sistemo volume attach <vm> <volume>       Attach volume to a VM
-sistemo volume detach <vm> <volume>       Detach volume from a VM
 sistemo image build <docker-image>        Build rootfs from Docker
 sistemo image list                        List available images
 sistemo service install                   Run as systemd service
 sistemo config                            Show configuration
 sistemo completion bash|zsh|fish          Shell completions
+
+# Aliases: ls=list, rm=delete, show=status
+sistemo vm ls                             # alias for list
+sistemo vm rm <name> -y                   # alias for delete, skip confirm
+sistemo vm show <name>                    # alias for status
+
+# Global flags
+--output json / -o json                   # JSON output (works on list/status)
+--yes / -y                                # Skip confirmation prompts
 ```
 
 ## Configuration

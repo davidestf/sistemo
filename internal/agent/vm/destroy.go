@@ -66,8 +66,24 @@ func deleteVM(ctx context.Context, m *Manager, vmID string, preserveStorage bool
 	}
 
 	if rootVolumePath != "" {
-		// VM uses a managed root volume
-		if !preserveStorage {
+		// VM uses a managed root volume.
+		// Only remove the volume file if it's still attached to this VM.
+		// If user already detached it, the volume belongs to them — don't touch it.
+		rootStillAttached := true // conservative default: assume attached unless proven otherwise
+		if m.db != nil {
+			var attached sql.NullString
+			err := m.db.QueryRow("SELECT attached FROM volume WHERE path=?", rootVolumePath).Scan(&attached)
+			if err == sql.ErrNoRows {
+				rootStillAttached = false // volume record gone, safe to remove file
+			} else if err != nil {
+				log.Warn("failed to check volume attachment status, assuming attached (conservative)", zap.Error(err))
+				// Keep rootStillAttached = true to prevent accidental deletion
+			} else {
+				rootStillAttached = attached.Valid && attached.String == vmID
+			}
+		}
+
+		if rootStillAttached && !preserveStorage {
 			if err := os.Remove(rootVolumePath); err != nil && !os.IsNotExist(err) {
 				log.Warn("failed to remove root volume file", zap.String("path", rootVolumePath), zap.Error(err))
 			} else {

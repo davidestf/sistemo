@@ -90,32 +90,9 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	}
 	log.Info("phase: network_setup", zap.Duration("elapsed", time.Since(t)), zap.String("vm_ip", vmIP))
 
-	rootfs := req.Image
 	var sha *string
 	kernelPath := m.cfg.KernelImagePath
 	initrdPath := m.cfg.KernelInitrdPath
-
-	// Download from HTTP(S) URL if needed (cache key includes URL hash so different URLs don't share one file)
-	if hasHTTPPrefix(rootfs) {
-		dest := cachePathForURL(m.cfg.ImageCacheDir, rootfs)
-		p, s, err := downloadFromURL(rootfs, dest)
-		if err != nil {
-			net.Cleanup(m.cfg.HostInterface)
-			network.ReleaseIP(m.db, req.VMID)
-			return nil, err
-		}
-		rootfs = p
-		sha = s
-	}
-
-	// Otherwise require an existing local path
-	if !filepath.IsAbs(rootfs) && !hasHTTPPrefix(rootfs) {
-		if _, err := os.Stat(rootfs); err != nil {
-			net.Cleanup(m.cfg.HostInterface)
-			network.ReleaseIP(m.db, req.VMID)
-			return nil, fmt.Errorf("image %q is not available: pass an HTTP(S) URL to a rootfs.ext4 or an absolute path to a rootfs.ext4 file", req.Image)
-		}
-	}
 
 	// cleanup releases network and IP on error
 	cleanup := func() {
@@ -141,26 +118,56 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 		vmRootfs = req.RootVolumePath
 	}
 
-	t = time.Now()
-	if err := copyFile(rootfs, vmRootfs); err != nil {
-		os.RemoveAll(vmDir)
-		cleanup()
-		return nil, fmt.Errorf("failed to copy rootfs: %v", err)
-	}
-	log.Info("phase: copy_rootfs", zap.Duration("elapsed", time.Since(t)))
+	if req.UseExistingVolume {
+		// Booting from existing volume — skip image copy and resize.
+		// The volume already has data from a previous deployment.
+		log.Info("phase: using_existing_volume", zap.String("path", vmRootfs))
+	} else {
+		// Fresh deployment — resolve image, copy, resize
+		rootfs := req.Image
 
-	if req.StorageMB > 0 {
+		// Download from HTTP(S) URL if needed
+		if hasHTTPPrefix(rootfs) {
+			dest := cachePathForURL(m.cfg.ImageCacheDir, rootfs)
+			p, s, err := downloadFromURL(rootfs, dest)
+			if err != nil {
+				os.RemoveAll(vmDir)
+				cleanup()
+				return nil, err
+			}
+			rootfs = p
+			sha = s
+		}
+
+		// Otherwise require an existing local path
+		if !filepath.IsAbs(rootfs) && !hasHTTPPrefix(rootfs) {
+			if _, err := os.Stat(rootfs); err != nil {
+				os.RemoveAll(vmDir)
+				cleanup()
+				return nil, fmt.Errorf("image %q is not available: pass an HTTP(S) URL to a rootfs.ext4 or an absolute path to a rootfs.ext4 file", req.Image)
+			}
+		}
+
 		t = time.Now()
-		if err := resizeRootfsTo(vmRootfs, req.StorageMB, log); err != nil {
+		if err := copyFile(rootfs, vmRootfs); err != nil {
 			os.RemoveAll(vmDir)
 			cleanup()
-			return nil, fmt.Errorf("resize rootfs to %d MB: %w", req.StorageMB, err)
+			return nil, fmt.Errorf("failed to copy rootfs: %v", err)
 		}
-		log.Info("phase: resize_rootfs", zap.Duration("elapsed", time.Since(t)), zap.Int("storage_mb", req.StorageMB))
+		log.Info("phase: copy_rootfs", zap.Duration("elapsed", time.Since(t)))
+
+		if req.StorageMB > 0 {
+			t = time.Now()
+			if err := resizeRootfsTo(vmRootfs, req.StorageMB, log); err != nil {
+				os.RemoveAll(vmDir)
+				cleanup()
+				return nil, fmt.Errorf("resize rootfs to %d MB: %w", req.StorageMB, err)
+			}
+			log.Info("phase: resize_rootfs", zap.Duration("elapsed", time.Since(t)), zap.Int("storage_mb", req.StorageMB))
+		}
 	}
 
-	// Always inject /init and SSH key into the rootfs copy so exec and terminal work.
-	// This operates on the copy in vmDir, not the original image.
+	// Always inject /init and SSH key — needed for terminal/exec even on existing volumes.
 	{
 		if err := verifyExt4Superblock(vmRootfs); err != nil {
 			os.RemoveAll(vmDir)
