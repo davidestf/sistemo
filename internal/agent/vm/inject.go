@@ -29,7 +29,10 @@ func injectRootfs(rootfsExt4, pubKeyPath string, logger *zap.Logger) error {
 		return fmt.Errorf("mount rootfs (is the file a valid ext4 image?): %w (%s)", err, string(out))
 	}
 	unmount := func() {
-		exec.Command("umount", mnt).Run()
+		if err := exec.Command("umount", mnt).Run(); err != nil {
+			// Lazy unmount as fallback to prevent stale mounts
+			exec.Command("umount", "-l", mnt).Run()
+		}
 	}
 	defer unmount()
 

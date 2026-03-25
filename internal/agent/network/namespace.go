@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	gonet "net"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -231,6 +232,22 @@ func (n *VMNetwork) Cleanup(_ string) error {
 	if vethOut != "" {
 		run("ip", "link", "delete", vethOut)
 	}
+
+	// Verify cleanup: check for leaked resources
+	if vethOut != "" {
+		if _, err := os.Stat("/sys/class/net/" + vethOut); err == nil {
+			log.Warn("leaked veth device after cleanup", zap.String("veth", vethOut))
+		}
+	}
+	if n.TapName != "" {
+		if _, err := os.Stat("/sys/class/net/" + n.TapName); err == nil {
+			log.Warn("leaked TAP device after cleanup", zap.String("tap", n.TapName))
+		}
+	}
+	if _, err := os.Stat("/run/netns/" + n.NamespaceName); err == nil {
+		log.Warn("leaked network namespace after cleanup", zap.String("ns", n.NamespaceName))
+	}
+
 	return nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -189,7 +190,7 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	if req.NetworkSubnet != "" {
 		ipBootArgs = network.GetBootArgsForSubnet(vmIP, req.NetworkSubnet)
 	}
-	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", ipBootArgs)
+	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 quiet loglevel=0 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", ipBootArgs)
 
 	drives := []firecracker.Drive{{DriveID: "rootfs", PathOnHost: vmRootfs, IsRootDevice: true, IsReadOnly: false}}
 	driveLetters := []string{"vdb", "vdc", "vdd", "vde", "vdf", "vdg", "vdh"}
@@ -565,7 +566,21 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 				vcpus, memoryMB = spec.VCPUs, spec.MemoryMB
 			}
 			if spec.RootVolumePath != "" {
-				vmRootfs = spec.RootVolumePath
+				// Verify the root volume is still attached to THIS VM before using it.
+				// If detached (e.g. deployed to another VM), fall back to local rootfs copy.
+				useVolume := true
+				if m.db != nil {
+					var attached sql.NullString
+					err := m.db.QueryRow("SELECT attached FROM volume WHERE path = ?", spec.RootVolumePath).Scan(&attached)
+					if err != nil || !attached.Valid || attached.String != vmID {
+						log.Warn("root volume no longer attached to this VM, using local rootfs",
+							zap.String("volume_path", spec.RootVolumePath))
+						useVolume = false
+					}
+				}
+				if useVolume {
+					vmRootfs = spec.RootVolumePath
+				}
 			}
 			netBridge = spec.NetworkBridge
 			netSubnet = spec.NetworkSubnet
@@ -617,7 +632,7 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 	if netSubnet != "" {
 		startIPBootArgs = network.GetBootArgsForSubnet(vmIP, netSubnet)
 	}
-	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", startIPBootArgs)
+	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 quiet loglevel=0 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", startIPBootArgs)
 
 	drives := []firecracker.Drive{{DriveID: "rootfs", PathOnHost: vmRootfs, IsRootDevice: true, IsReadOnly: false}}
 	driveLetters := []string{"vdb", "vdc", "vdd", "vde", "vdf", "vdg", "vdh"}

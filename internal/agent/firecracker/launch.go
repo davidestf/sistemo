@@ -41,6 +41,8 @@ func LaunchInNamespace(vmBaseDir string, vmID string, firecrackerBin string, cfg
 		return 0, fmt.Errorf("failed to create log file: %v", err)
 	}
 
+	// Firecracker v1.14+ enables seccomp by default (built-in BPF syscall filter).
+	// No --seccomp-level flag needed — it's on unless --no-seccomp is passed.
 	fcArgs := []string{firecrackerBin, "--api-sock", apiSock, "--config-file", configPath}
 
 	var innerArgs []string

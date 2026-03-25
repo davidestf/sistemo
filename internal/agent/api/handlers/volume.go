@@ -325,6 +325,26 @@ func (h *Volume) Resize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Atomically claim the volume for resize — prevents concurrent resize/attach races
+	claimResult, err := h.db.Exec(
+		"UPDATE volume SET status='maintenance', last_state_change=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status != 'maintenance'",
+		volID,
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock volume for resize")
+		return
+	}
+	if n, _ := claimResult.RowsAffected(); n == 0 {
+		writeError(w, http.StatusConflict, "volume is in maintenance — another operation is in progress")
+		return
+	}
+	// Restore status on completion or error
+	restoreStatus := volStatus
+	defer func() {
+		h.db.Exec("UPDATE volume SET status=?, last_state_change=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id=? AND status='maintenance'",
+			restoreStatus, volID)
+	}()
+
 	// Grow the file.
 	f, err := os.OpenFile(volPath, os.O_WRONLY, 0)
 	if err != nil {
@@ -346,8 +366,8 @@ func (h *Volume) Resize(w http.ResponseWriter, r *http.Request) {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		}
-		// e2fsck exit code 1 = errors corrected (OK)
-		if exitCode != 0 && exitCode != 1 {
+		// e2fsck exit codes: 0=clean, 1=errors corrected, 2=errors corrected+reboot (fine for volume files)
+		if exitCode > 2 {
 			h.logger.Error("e2fsck failed during resize", zap.Error(err), zap.String("output", string(out)))
 			writeError(w, http.StatusInternalServerError, "filesystem check failed before resize")
 			return
@@ -374,7 +394,7 @@ func (h *Volume) Resize(w http.ResponseWriter, r *http.Request) {
 		"id":      volID,
 		"name":    volName,
 		"size_mb": req.SizeMB,
-		"status":  "resized",
+		"status":  restoreStatus,
 	})
 }
 
@@ -412,12 +432,6 @@ func (h *Volume) Attach(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.logger.Error("lookup volume for attach failed", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "failed to look up volume")
-		return
-	}
-
-	// Fix 5: Role enforcement — cannot attach root volumes via attach API
-	if volRole == "root" {
-		writeError(w, http.StatusConflict, "cannot attach a root volume — use --volume flag on deploy instead")
 		return
 	}
 
@@ -505,6 +519,23 @@ func (h *Volume) Detach(w http.ResponseWriter, r *http.Request) {
 	}
 	if volStatus != "attached" {
 		writeError(w, http.StatusConflict, "volume is not attached")
+		return
+	}
+
+	// Verify the volume is attached to the VM in the URL
+	if attached == nil || *attached == "" {
+		writeError(w, http.StatusConflict, "volume is not attached to any VM")
+		return
+	}
+	// Resolve vmIDParam — could be name or ID
+	var resolvedVMID string
+	err = h.db.QueryRow("SELECT id FROM vm WHERE (id = ? OR name = ?) AND status != 'deleted'", vmIDParam, vmIDParam).Scan(&resolvedVMID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "VM not found")
+		return
+	}
+	if *attached != resolvedVMID {
+		writeError(w, http.StatusConflict, fmt.Sprintf("volume is not attached to this VM (attached to %s)", *attached))
 		return
 	}
 
