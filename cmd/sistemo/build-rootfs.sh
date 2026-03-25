@@ -21,8 +21,14 @@ if [ "$(id -u)" != "0" ]; then
   exit 1
 fi
 
-ROOTFS_MB="${ROOTFS_MB:-2048}"
-TMPDIR=$(mktemp -d)
+# Accept both ROOTFS_SIZE_MB (from dashboard) and ROOTFS_MB (legacy)
+ROOTFS_MB="${ROOTFS_SIZE_MB:-${ROOTFS_MB:-5120}}"
+# Use SISTEMO_BUILD_TMPDIR if set (disk-backed), else system default (/tmp)
+if [ -n "$SISTEMO_BUILD_TMPDIR" ] && [ -d "$SISTEMO_BUILD_TMPDIR" ]; then
+  TMPDIR=$(mktemp -d -p "$SISTEMO_BUILD_TMPDIR")
+else
+  TMPDIR=$(mktemp -d)
+fi
 trap "rm -rf '$TMPDIR'" EXIT
 
 echo "Creating container from $IMAGE..."
