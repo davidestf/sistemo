@@ -16,10 +16,10 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.25"
 
       - name: Run tests
-        run: go test ./...
+        run: go test -race -count=1 ./...
 
       - name: Build linux/amd64
         env:

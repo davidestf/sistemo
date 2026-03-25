@@ -104,6 +104,22 @@ sudo sistemo doctor
 - **Shell completions** -- `sistemo completion bash|zsh|fish`
 - **Config validation** -- Bad config? Clear error with fix suggestion
 - **x86_64 + ARM64** -- Intel, AMD, Raspberry Pi 5, Hetzner CAX, Graviton
+- **Security** -- Seccomp syscall filtering, per-VM cgroup limits, network namespace isolation
+
+## Web Dashboard
+
+Open `http://localhost:7777/dashboard/` after starting the daemon.
+
+- **Deploy VMs** from registry, Docker images, or URLs — all from the browser
+- **Terminal** — full xterm.js SSH terminal embedded in the dashboard
+- **Manage everything** — VMs, images, volumes, networks, ports
+- **Build Docker images** — type `nginx:latest`, click Build & Deploy
+- **Activity history** — full audit log with filters
+- **System health** — host CPU, RAM, disk, Firecracker status
+- **Authentication** — admin account with JWT sessions (Portainer-style setup)
+- **Localhost bypass** — CLI works without auth on the same machine
+
+First visit creates your admin account. After that, login is required for remote access.
 
 ## Requirements
 
@@ -169,6 +185,7 @@ sistemo volume resize <name> <size>       Resize a volume
 sistemo image build <docker-image>        Build rootfs from Docker
 sistemo image list                        List available images
 sistemo service install                   Run as systemd service
+sistemo admin reset-password             Reset dashboard admin password
 sistemo config                            Show configuration
 sistemo completion bash|zsh|fish          Shell completions
 
