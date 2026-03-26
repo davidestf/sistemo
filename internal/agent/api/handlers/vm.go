@@ -44,6 +44,7 @@ type createVMRequest struct {
 	Metadata        map[string]string `json:"metadata,omitempty"`
 	AttachedStorage []string          `json:"attached_storage,omitempty"`
 	InjectInitSSH   bool              `json:"inject_init_ssh,omitempty"`
+	NetworkName     string            `json:"network_name,omitempty"`
 	NetworkBridge   string            `json:"network_bridge,omitempty"`
 	NetworkSubnet   string            `json:"network_subnet,omitempty"`
 }
@@ -129,6 +130,25 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Resolve network name to bridge/subnet if provided (dashboard sends network_name)
+	networkID := ""
+	if req.NetworkName != "" && req.NetworkName != "default" && h.db != nil {
+		var bridgeName, subnet, netID string
+		err := h.db.QueryRow("SELECT id, bridge_name, subnet FROM network WHERE name = ?", req.NetworkName).Scan(&netID, &bridgeName, &subnet)
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, fmt.Sprintf("network %q not found", req.NetworkName))
+			return
+		}
+		if err != nil {
+			h.logger.Error("network lookup failed", zap.String("network_name", req.NetworkName), zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to look up network")
+			return
+		}
+		req.NetworkBridge = bridgeName
+		req.NetworkSubnet = subnet
+		networkID = netID
+	}
+
 	// Insert DB record before creating VM
 	imageForDB := req.Image
 	if imageForDB == "" && req.RootVolume != "" {
@@ -137,16 +157,17 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 	if h.db != nil {
 		now := time.Now().UTC().Format(time.RFC3339)
 		_, err := h.db.Exec(
-			`INSERT INTO vm (id, name, status, maintenance_operation, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
-			 VALUES (?, ?, 'maintenance', 'creating', ?, ?, ?, ?, ?, ?)`,
-			vmid, name, imageForDB, effectiveVCPUs, effectiveMemoryMB, req.StorageMB, now, now,
+			`INSERT INTO vm (id, name, status, maintenance_operation, image, vcpus, memory_mb, storage_mb, network_id, created_at, last_state_change)
+			 VALUES (?, ?, 'maintenance', 'creating', ?, ?, ?, ?, ?, ?, ?)`,
+			vmid, name, imageForDB, effectiveVCPUs, effectiveMemoryMB, req.StorageMB, networkID, now, now,
 		)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE constraint failed: vm.name") {
 				writeError(w, http.StatusConflict, fmt.Sprintf("A VM named %q already exists. Use --name or delete the existing one.", name))
 				return
 			}
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("insert vm: %v", err))
+			h.logger.Error("insert vm failed", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to create VM record")
 			return
 		}
 	}
@@ -170,7 +191,8 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("query volume: %v", err))
+			h.logger.Error("query volume failed", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to look up volume")
 			return
 		}
 		if volStatus != "online" {
@@ -240,7 +262,17 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 				idOrName, idOrName,
 			).Scan(&volID, &volPath, &volStatus)
 			if err == sql.ErrNoRows {
-				// Not in DB — try as raw filesystem path for backward compat
+				// Not in DB — only allow raw filesystem paths for CLI backward compat
+				if !strings.HasPrefix(idOrName, "/") {
+					if useExistingVolume {
+						db.SafeExec(h.db, "UPDATE volume SET status='online', attached=NULL, last_state_change=? WHERE id=?", now, rootVolID)
+					} else {
+						h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
+					}
+					db.SafeExec(h.db, "DELETE FROM vm WHERE id=?", vmid)
+					writeError(w, http.StatusNotFound, fmt.Sprintf("volume %q not found", idOrName))
+					return
+				}
 				if _, statErr := os.Stat(idOrName); statErr != nil {
 					// Clean up root volume on early return
 					if useExistingVolume {
@@ -248,6 +280,7 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 					} else {
 						h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
 					}
+					db.SafeExec(h.db, "DELETE FROM vm WHERE id=?", vmid)
 					writeError(w, http.StatusNotFound, fmt.Sprintf("volume %q not found in database and path does not exist", idOrName))
 					return
 				}
@@ -260,6 +293,7 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 				} else {
 					h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
 				}
+					db.SafeExec(h.db, "DELETE FROM vm WHERE id=?", vmid)
 				writeError(w, http.StatusInternalServerError, fmt.Sprintf("query volume %q: %v", idOrName, err))
 				return
 			}
@@ -269,6 +303,7 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 				} else {
 					h.db.Exec("DELETE FROM volume WHERE id=?", rootVolID)
 				}
+					db.SafeExec(h.db, "DELETE FROM vm WHERE id=?", vmid)
 				writeError(w, http.StatusConflict, fmt.Sprintf("volume %q is already attached", idOrName))
 				return
 			}
@@ -344,7 +379,7 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	db.LogAction(h.db, "create", "vm", vmid, name, fmt.Sprintf("image=%s vcpus=%d memory=%dMB", req.Image, effectiveVCPUs, effectiveMemoryMB), true)
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusCreated, result)
 }
 
 // validVMID extracts and validates the vmID URL parameter. Returns empty string on failure (response already written).
@@ -400,10 +435,8 @@ func (h *VM) Delete(w http.ResponseWriter, r *http.Request) {
 		stillAttached := volAttached.Valid && volAttached.String == vmID
 
 		if stillAttached && !preserveStorage {
-			// Delete root volume record — the file was already removed by deleteVM
 			db.SafeExec(h.db, "DELETE FROM volume WHERE id=?", rootVolID.String)
 		} else if stillAttached && preserveStorage {
-			// Detach but keep volume available for re-use
 			db.SafeExec(h.db, "UPDATE volume SET status='online', attached=NULL, last_state_change=? WHERE id=?", now, rootVolID.String)
 		}
 		// If not attached (user already detached): do nothing — volume is independent

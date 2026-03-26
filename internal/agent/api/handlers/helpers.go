@@ -8,8 +8,8 @@ import (
 )
 
 // safeIDPattern matches alphanumeric IDs with hyphens, underscores, and dots.
-// Dots are allowed (e.g. "node-1.0") but ".." is blocked by requiring the first char
-// to be alphanumeric and not allowing consecutive dots via the overall pattern.
+// Dots are allowed (e.g. "node-1.0"). Consecutive dots (..) are blocked by
+// explicit check in isValidSafeID below.
 var safeIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
 // isValidSafeID validates that an ID is safe to use in file paths (no traversal).
@@ -36,5 +36,3 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
-
-

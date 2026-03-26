@@ -27,6 +27,10 @@ sistemo-linux-*
 # Node
 node_modules/
 
+# Dashboard build output
+frontend/dashboard/dist/
+internal/agent/api/dashboard_dist/
+
 # Not part of open-source repo
 deploy/
 docs/

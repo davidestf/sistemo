@@ -52,6 +52,7 @@ func NewManager(ctx context.Context, cfg *config.Config, logger *zap.Logger, db 
 	m.cleanupStaleBridges()
 	m.rehydrateFromDisk()
 	m.cleanupDeadRunningVMs()
+	m.cleanupStaleMaintenanceVMs()
 	m.restorePortRules()
 	preserve := make(map[string]struct{})
 	m.mu.RLock()
@@ -313,6 +314,68 @@ func (m *Manager) cleanupDeadRunningVMs() {
 		db.SafeExec(m.db, "UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE id = ?",
 			time.Now().UTC().Format(time.RFC3339), id)
 		m.logger.Info("marked dead running VM as stopped (restartable)", zap.String("vm_id", id))
+	}
+}
+
+// cleanupStaleMaintenanceVMs recovers VMs and volumes stuck in 'maintenance' after a daemon crash.
+// VMs stuck in 'creating' are incomplete and should be deleted.
+// VMs stuck in other maintenance ops are set to 'error' so the user can retry or delete.
+// Volumes stuck in 'maintenance' whose VM is not running are reset to 'online'.
+func (m *Manager) cleanupStaleMaintenanceVMs() {
+	if m.db == nil {
+		return
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// VMs stuck in maintenance/creating: incomplete creation — clean up everything.
+	// Collect IDs first, close rows, THEN do cleanup writes (avoids SQLite read/write lock contention).
+	type staleVM struct{ id, name string }
+	var staleCreating []staleVM
+	rows, err := m.db.Query("SELECT id, name FROM vm WHERE status = 'maintenance' AND maintenance_operation = 'creating'")
+	if err == nil {
+		for rows.Next() {
+			var s staleVM
+			if rows.Scan(&s.id, &s.name) == nil {
+				staleCreating = append(staleCreating, s)
+			}
+		}
+		rows.Close()
+	}
+	for _, s := range staleCreating {
+		m.logger.Warn("cleaning up incomplete VM creation", zap.String("vm_id", s.id), zap.String("name", s.name))
+		db.SafeExec(m.db, "DELETE FROM ip_allocation WHERE vm_id = ?", s.id)
+		db.SafeExec(m.db, "DELETE FROM port_rule WHERE vm_id = ?", s.id)
+		// Detach all volumes — reset to 'online' so user can reuse them. Never delete user volumes.
+		db.SafeExec(m.db, "UPDATE volume SET status='online', attached=NULL, last_state_change=? WHERE attached=?", now, s.id)
+		// Remove VM working directory (contains the rootfs COPY, not the original volume)
+		os.RemoveAll(filepath.Join(m.cfg.VMBaseDir, s.id))
+		db.SafeExec(m.db, "DELETE FROM vm WHERE id = ?", s.id)
+		db.LogAction(m.db, "cleanup.stale_creating", "vm", s.id, s.name, "Removed incomplete VM from crashed creation", true)
+	}
+
+	// VMs stuck in stopping/starting: the Firecracker process died with the daemon,
+	// so these VMs are effectively stopped. Set to 'stopped' (not 'error') so the
+	// user can restart them without losing their configuration.
+	if result, err := m.db.Exec("UPDATE vm SET status = 'stopped', maintenance_operation = NULL, last_state_change = ? WHERE status = 'maintenance' AND maintenance_operation IN ('stopping', 'starting')", now); err != nil {
+		m.logger.Warn("failed to reset stale stopping/starting VMs", zap.Error(err))
+	} else if n, _ := result.RowsAffected(); n > 0 {
+		m.logger.Warn("reset stale stopping/starting VMs to stopped", zap.Int64("count", n))
+	}
+
+	// VMs stuck in deleting or other unknown maintenance: mark as error so user can retry
+	if result, err := m.db.Exec("UPDATE vm SET status = 'error', maintenance_operation = NULL, last_state_change = ? WHERE status = 'maintenance'", now); err != nil {
+		m.logger.Warn("failed to reset stale maintenance VMs", zap.Error(err))
+	} else if n, _ := result.RowsAffected(); n > 0 {
+		m.logger.Warn("reset stale maintenance VMs to error", zap.Int64("count", n))
+	}
+
+	// Volumes stuck in maintenance whose attached VM is not running: reset to online
+	if result, err := m.db.Exec(`UPDATE volume SET status='online', attached=NULL, last_state_change=?
+		WHERE status='maintenance'
+		AND (attached IS NULL OR attached NOT IN (SELECT id FROM vm WHERE status='running'))`, now); err != nil {
+		m.logger.Warn("failed to reset stale maintenance volumes", zap.Error(err))
+	} else if n, _ := result.RowsAffected(); n > 0 {
+		m.logger.Warn("reset stale maintenance volumes to online", zap.Int64("count", n))
 	}
 }
 

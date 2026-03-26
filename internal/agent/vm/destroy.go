@@ -88,7 +88,13 @@ func deleteVM(ctx context.Context, m *Manager, vmID string, preserveStorage bool
 				log.Warn("failed to remove root volume file", zap.String("path", rootVolumePath), zap.Error(err))
 			} else {
 				log.Info("removed root volume file", zap.String("path", rootVolumePath))
+				// Delete the DB record too — file is gone, no point keeping a ghost entry
+				db.SafeExec(m.db, "DELETE FROM volume WHERE path = ?", rootVolumePath)
 			}
+		} else if rootStillAttached && preserveStorage {
+			// User wants to keep storage — detach the volume so it's reusable
+			db.SafeExec(m.db, "UPDATE volume SET status='online', attached=NULL, last_state_change=? WHERE path=?",
+				time.Now().UTC().Format(time.RFC3339), rootVolumePath)
 		}
 		// Always remove vmDir — it only has metadata files, not the rootfs
 		if err := os.RemoveAll(vmDir); err != nil {
@@ -110,6 +116,12 @@ func deleteVM(ctx context.Context, m *Manager, vmID string, preserveStorage bool
 				log.Warn("failed to remove VM directory", zap.String("vm_id", vmID), zap.Error(err))
 			}
 		}
+	}
+
+	// Detach all non-root data volumes so user can reuse them
+	if m.db != nil {
+		db.SafeExec(m.db, "UPDATE volume SET status='online', attached=NULL, last_state_change=? WHERE attached=? AND role != 'root'",
+			time.Now().UTC().Format(time.RFC3339), vmID)
 	}
 
 	m.unregisterVM(vmID)

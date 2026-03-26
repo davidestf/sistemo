@@ -62,6 +62,12 @@ type Config struct {
 	// API rate limiting per IP (0 = disabled)
 	RateLimitRPS   int `envconfig:"RATE_LIMIT_RPS" default:"100"`
 	RateLimitBurst int `envconfig:"RATE_LIMIT_BURST" default:"200"`
+
+	// Dashboard session timeout in hours. Default: 8 hours.
+	SessionTimeoutHours int `envconfig:"SESSION_TIMEOUT_HOURS" default:"8"`
+
+	// DataDir is the root data directory (~/.sistemo). Set by the daemon at startup.
+	DataDir string `envconfig:"-"`
 }
 
 // yamlConfig mirrors Config fields for YAML parsing. Only non-zero values override.

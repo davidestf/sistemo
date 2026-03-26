@@ -41,8 +41,34 @@ func (h *Network) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if req.Name == "" || req.Subnet == "" || req.BridgeName == "" {
-		writeError(w, http.StatusBadRequest, "name, subnet, and bridge_name are required")
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	// Auto-generate bridge_name if not provided
+	if req.BridgeName == "" {
+		req.BridgeName = "br-" + req.Name
+		if len(req.BridgeName) > 15 {
+			req.BridgeName = "br-" + req.Name[:12]
+		}
+	}
+	// Auto-assign subnet if not provided
+	if req.Subnet == "" && h.db != nil {
+		for i := 201; i <= 254; i++ {
+			candidate := fmt.Sprintf("10.%d.0.0/24", i)
+			var count int
+			h.db.QueryRow("SELECT COUNT(*) FROM network WHERE subnet = ?", candidate).Scan(&count)
+			if count == 0 {
+				req.Subnet = candidate
+				break
+			}
+		}
+		if req.Subnet == "" {
+			writeError(w, http.StatusConflict, "no free subnets available")
+			return
+		}
+	} else if req.Subnet == "" {
+		writeError(w, http.StatusBadRequest, "subnet is required")
 		return
 	}
 	if !safeBridgeName.MatchString(req.BridgeName) {
@@ -67,13 +93,20 @@ func (h *Network) Create(w http.ResponseWriter, r *http.Request) {
 
 	// Persist network record so Delete can look up the bridge_name.
 	if h.db != nil {
-		db.SafeExec(h.db, `INSERT INTO network (id, name, subnet, bridge_name, created_at) VALUES (?, ?, ?, ?, datetime('now'))
+		_, err := h.db.Exec(`INSERT INTO network (id, name, subnet, bridge_name, created_at) VALUES (?, ?, ?, ?, datetime('now'))
 			ON CONFLICT(name) DO UPDATE SET subnet=excluded.subnet, bridge_name=excluded.bridge_name`,
 			uuid.NewString(), req.Name, req.Subnet, req.BridgeName)
+		if err != nil {
+			h.logger.Error("failed to persist network record", zap.Error(err))
+			// Clean up the bridge we just created — don't leave orphaned OS resources
+			network.DeleteNamedBridge(req.BridgeName, h.logger)
+			writeError(w, http.StatusInternalServerError, "failed to save network record")
+			return
+		}
 	}
 
 	db.LogAction(h.db, "create", "network", req.Name, req.Name, fmt.Sprintf("subnet=%s bridge=%s", req.Subnet, req.BridgeName), true)
-	writeJSON(w, http.StatusOK, map[string]string{
+	writeJSON(w, http.StatusCreated, map[string]string{
 		"name":   req.Name,
 		"subnet": req.Subnet,
 		"bridge": req.BridgeName,

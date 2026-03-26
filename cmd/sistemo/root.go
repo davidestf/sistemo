@@ -150,6 +150,7 @@ func Execute() {
 	root.AddCommand(doctorCmd())
 	root.AddCommand(historyCmd())
 	root.AddCommand(completionCmd())
+	root.AddCommand(adminCmd())
 
 	if err := root.Execute(); err != nil {
 		var exitErr *ExitError

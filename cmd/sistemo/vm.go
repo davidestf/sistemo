@@ -111,13 +111,21 @@ Examples:
 				return fmt.Errorf("provide an image name or --volume to boot from an existing volume")
 			}
 
+			if vcpus < 1 || vcpus > 64 {
+				return fmt.Errorf("invalid --vcpus %d: must be between 1 and 64", vcpus)
+			}
+
 			memoryMB, err := parseSizeMB(memoryStr)
 			if err != nil {
-				return err
+				return fmt.Errorf("invalid --memory %q: %w (use a number in MB, or e.g. 1G, 2GB)", memoryStr, err)
 			}
+			if memoryMB < 128 {
+				return fmt.Errorf("invalid --memory: minimum is 128 MB")
+			}
+
 			storageMB, err := parseSizeMB(storageStr)
 			if err != nil {
-				return err
+				return fmt.Errorf("invalid --storage %q: %w (use a number in MB, or e.g. 1G, 10GB)", storageStr, err)
 			}
 
 			if imageArg != "" {
