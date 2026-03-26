@@ -110,6 +110,8 @@ sudo sistemo doctor
 
 Open `http://localhost:7777/dashboard/` after starting the daemon.
 
+![Sistemo Dashboard — Virtual Machines](https://sistemo.io/blog/v060/dashboard-vms.png)
+
 - **Deploy VMs** from registry, Docker images, or URLs — all from the browser
 - **Terminal** — full xterm.js SSH terminal embedded in the dashboard
 - **Manage everything** — VMs, images, volumes, networks, ports
@@ -219,7 +221,7 @@ Set `HOST_API_KEY` if exposing the daemon beyond localhost.
 
 **[docs.sistemo.io](https://docs.sistemo.io)** — Full guides and reference:
 
-[Quick start](https://docs.sistemo.io/quickstart/) | [Networking](https://docs.sistemo.io/networking/) | [Port expose](https://docs.sistemo.io/port-expose/) | [Commands](https://docs.sistemo.io/commands/) | [Configuration](https://docs.sistemo.io/configuration/) | [Building images](https://docs.sistemo.io/building-images/) | [Troubleshooting](https://docs.sistemo.io/troubleshooting/)
+[Quick start](https://docs.sistemo.io/quickstart/) | [Dashboard](https://docs.sistemo.io/dashboard/) | [Networking](https://docs.sistemo.io/networking/) | [Port expose](https://docs.sistemo.io/port-expose/) | [Volumes](https://docs.sistemo.io/storage/) | [Commands](https://docs.sistemo.io/commands/) | [Configuration](https://docs.sistemo.io/configuration/) | [Building images](https://docs.sistemo.io/building-images/) | [Troubleshooting](https://docs.sistemo.io/troubleshooting/)
 
 ## License
 

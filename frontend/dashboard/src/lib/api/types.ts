@@ -20,6 +20,7 @@ export interface VM {
   last_state_change: string;
   port_rules: PortRule[];
   pid: number;
+  image_digest?: string;
 }
 
 export interface AuditEntry {
@@ -40,6 +41,8 @@ export interface ImageInfo {
   size_mb: number;
   created_at: string;
   source: string;
+  digest?: string;
+  verified?: boolean;
 }
 
 export interface VolumeInfo {
@@ -69,6 +72,7 @@ export interface BuildStatus {
   build_name: string;
   message: string;
   started_at: string;
+  image_digest?: string;
 }
 
 export interface NetworkInfo {

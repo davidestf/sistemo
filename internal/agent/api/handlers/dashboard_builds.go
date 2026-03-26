@@ -15,18 +15,20 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/davidestf/sistemo/internal/db"
 	"go.uber.org/zap"
 )
 
 // --- Build types ---
 
 type buildStatusResponse struct {
-	ID        string `json:"id"`
-	Status    string `json:"status"` // building, complete, error
-	Image     string `json:"image"`
-	BuildName string `json:"build_name"`
-	Message   string `json:"message"`
-	StartedAt string `json:"started_at"`
+	ID          string `json:"id"`
+	Status      string `json:"status"` // building, complete, error
+	Image       string `json:"image"`
+	BuildName   string `json:"build_name"`
+	Message     string `json:"message"`
+	StartedAt   string `json:"started_at"`
+	ImageDigest string `json:"image_digest,omitempty"`
 }
 
 // activeBuilds tracks running build processes for cancellation.
@@ -186,6 +188,20 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 			updateBuild("error", fmt.Sprintf("build failed: %v %s", err, msg))
 		} else {
 			updateBuild("complete", fmt.Sprintf("Built %s.rootfs.ext4", buildName))
+
+			// Register image in content-addressable store
+			if digest, hashErr := db.HashFile(outputPath); hashErr == nil {
+				info, _ := os.Stat(outputPath)
+				now := time.Now().UTC().Format(time.RFC3339)
+				var sizeBytes int64
+				if info != nil {
+					sizeBytes = info.Size()
+				}
+				h.db.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'docker_build', ?, ?, ?)",
+					digest, buildName, buildName+".rootfs.ext4", outputPath, sizeBytes, imageName, now, now)
+				h.db.Exec("INSERT OR IGNORE INTO image_tag (tag, digest) VALUES (?, ?)", buildName, digest)
+				h.db.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, buildID)
+			}
 		}
 
 		h.logger.Info("image build completed",
@@ -221,14 +237,14 @@ func (h *DashboardAPI) ImageBuildStatus(w http.ResponseWriter, r *http.Request) 
 	// Try by id first, then by build_name (backward compat)
 	var bs buildStatusResponse
 	err := h.db.QueryRow(
-		"SELECT id, status, image, build_name, message, started_at FROM image_build WHERE id = ?",
+		"SELECT id, status, image, build_name, message, started_at, COALESCE(image_digest, '') FROM image_build WHERE id = ?",
 		name,
-	).Scan(&bs.ID, &bs.Status, &bs.Image, &bs.BuildName, &bs.Message, &bs.StartedAt)
+	).Scan(&bs.ID, &bs.Status, &bs.Image, &bs.BuildName, &bs.Message, &bs.StartedAt, &bs.ImageDigest)
 	if err != nil {
 		err = h.db.QueryRow(
-			"SELECT id, status, image, build_name, message, started_at FROM image_build WHERE build_name = ? ORDER BY started_at DESC LIMIT 1",
+			"SELECT id, status, image, build_name, message, started_at, COALESCE(image_digest, '') FROM image_build WHERE build_name = ? ORDER BY started_at DESC LIMIT 1",
 			name,
-		).Scan(&bs.ID, &bs.Status, &bs.Image, &bs.BuildName, &bs.Message, &bs.StartedAt)
+		).Scan(&bs.ID, &bs.Status, &bs.Image, &bs.BuildName, &bs.Message, &bs.StartedAt, &bs.ImageDigest)
 	}
 	if err != nil {
 		writeError(w, http.StatusNotFound, "no build found for this image")
@@ -302,7 +318,7 @@ func (h *DashboardAPI) ImageBuilds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := h.db.Query("SELECT id, status, image, build_name, message, started_at FROM image_build ORDER BY started_at DESC LIMIT 20")
+	rows, err := h.db.Query("SELECT id, status, image, build_name, message, started_at, COALESCE(image_digest, '') FROM image_build ORDER BY started_at DESC LIMIT 20")
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"builds": []buildStatusResponse{}})
 		return
@@ -312,7 +328,7 @@ func (h *DashboardAPI) ImageBuilds(w http.ResponseWriter, r *http.Request) {
 	var builds []buildStatusResponse
 	for rows.Next() {
 		var b buildStatusResponse
-		if rows.Scan(&b.ID, &b.Status, &b.Image, &b.BuildName, &b.Message, &b.StartedAt) == nil {
+		if rows.Scan(&b.ID, &b.Status, &b.Image, &b.BuildName, &b.Message, &b.StartedAt, &b.ImageDigest) == nil {
 			builds = append(builds, b)
 		}
 	}

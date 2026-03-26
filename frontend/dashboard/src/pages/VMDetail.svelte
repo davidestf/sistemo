@@ -351,6 +351,9 @@
         <div>
           <p class="text-sm text-muted">Image</p>
           <p class="text-text mt-0.5">{imageName(vm.image)}</p>
+          {#if vm.image_digest}
+            <p class="text-muted font-mono text-xs mt-0.5" title="sha256:{vm.image_digest}">sha256:{vm.image_digest.slice(0, 16)}...</p>
+          {/if}
         </div>
         <div>
           <p class="text-sm text-muted">Namespace</p>

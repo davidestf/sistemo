@@ -124,9 +124,14 @@
           building = false;
           addToast('Build complete', 'success');
           await fetchData();
-          // Match by build_name from the completed status
-          const builtName = status.build_name;
-          const built = localImages.find(l => l.name === builtName || l.file === builtName + '.rootfs.ext4');
+          // Match by image_digest (preferred) or build_name (fallback)
+          let built = status.image_digest
+            ? localImages.find(l => l.digest === status.image_digest)
+            : null;
+          if (!built) {
+            const builtName = status.build_name;
+            built = localImages.find(l => l.name === builtName || l.file === builtName + '.rootfs.ext4');
+          }
           if (built) {
             selectImage(built.path, built.name);
           }
