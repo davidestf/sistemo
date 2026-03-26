@@ -3,6 +3,7 @@ package network
 import (
 	"fmt"
 	"net"
+	"os/exec"
 	"strings"
 
 	"go.uber.org/zap"
@@ -57,6 +58,13 @@ func ParseBridgeSubnet(cidr string) error {
 // EnsureBridge creates the sistemo0 bridge if it doesn't exist, assigns an IP,
 // and sets up NAT for outbound internet access from VMs.
 func EnsureBridge(_ string, logger *zap.Logger) error {
+	// Check required binaries before doing anything
+	for _, bin := range []string{"iptables", "ip", "sysctl"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			return fmt.Errorf("%s not found — install it (e.g. apt install iptables iproute2 procps)", bin)
+		}
+	}
+
 	// Create bridge if not exists
 	if rc, _, _ := run("ip", "link", "show", BridgeName); rc != 0 {
 		if rc, out, _ := run("ip", "link", "add", BridgeName, "type", "bridge"); rc != 0 {

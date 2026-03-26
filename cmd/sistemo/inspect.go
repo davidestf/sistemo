@@ -291,6 +291,10 @@ func runImagePull(logger *zap.Logger, dataDir, name string) error {
 
 	dest := filepath.Join(imagesDir, name+".rootfs.ext4")
 	suffix := archSuffix()
+	// Don't double the suffix if the name already includes it (e.g. "debian-arm64")
+	if strings.HasSuffix(name, suffix) {
+		suffix = ""
+	}
 
 	fmt.Printf("Pulling %s from %s... ", name, registryURL())
 	err := downloadImageToFile(registryURL()+name+suffix+".rootfs.ext4.gz", dest)
