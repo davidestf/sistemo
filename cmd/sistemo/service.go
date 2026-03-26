@@ -44,16 +44,24 @@ func serviceInstallCmd() *cobra.Command {
 			}
 			dataDir := getDataDirFromCmd(cmd)
 
+			// Check if already running (to decide start vs restart)
+			wasRunning := exec.Command("systemctl", "is-active", "--quiet", "sistemo").Run() == nil
+
 			unit := generateUnitFile(binaryPath, dataDir)
 			if err := os.WriteFile(unitFilePath, []byte(unit), 0644); err != nil {
 				return fmt.Errorf("write unit file: %w", err)
 			}
 			fmt.Printf("Wrote %s\n", unitFilePath)
 
+			startCmd := "start"
+			if wasRunning {
+				startCmd = "restart"
+			}
+
 			for _, cmdArgs := range [][]string{
 				{"systemctl", "daemon-reload"},
 				{"systemctl", "enable", "sistemo"},
-				{"systemctl", "start", "sistemo"},
+				{"systemctl", startCmd, "sistemo"},
 			} {
 				c := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 				c.Stdout = os.Stdout
@@ -62,7 +70,11 @@ func serviceInstallCmd() *cobra.Command {
 					return fmt.Errorf("%s: %w", strings.Join(cmdArgs, " "), err)
 				}
 			}
-			fmt.Println("Sistemo service installed and started.")
+			if wasRunning {
+				fmt.Println("Sistemo service updated and restarted.")
+			} else {
+				fmt.Println("Sistemo service installed and started.")
+			}
 			fmt.Println("  Status:  systemctl status sistemo")
 			fmt.Println("  Logs:    journalctl -u sistemo -f")
 			fmt.Println("  Stop:    sudo systemctl stop sistemo")

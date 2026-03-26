@@ -108,6 +108,10 @@ func resolveImage(logger *zap.Logger, dataDir, image string) (string, error) {
 	os.MkdirAll(imagesDir, 0755)
 	dest := filepath.Join(imagesDir, image+".rootfs.ext4")
 	suffix := archSuffix()
+	// Don't double the suffix if the image name already includes it (e.g. "debian-arm64")
+	if strings.HasSuffix(image, suffix) {
+		suffix = ""
+	}
 
 	registryFile := image + suffix + ".rootfs.ext4.gz"
 	gzURL := registryURL() + registryFile

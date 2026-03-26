@@ -60,7 +60,12 @@ func run(name string, args ...string) (int, string, string) {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			exitCode = exitErr.ExitCode()
 		} else {
+			// Binary not found or other exec error — include the error message
+			// so callers don't get an empty string.
 			exitCode = 1
+			if len(out) == 0 {
+				return exitCode, err.Error(), ""
+			}
 		}
 	}
 	return exitCode, string(out), ""

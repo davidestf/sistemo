@@ -311,9 +311,10 @@ func (h *DashboardAPI) RegistryDownload(w http.ResponseWriter, r *http.Request) 
 		regURL += "/"
 	}
 
-	// Arch suffix: arm64 adds "-arm64", amd64 has no suffix (matches CLI behavior)
+	// Arch suffix: arm64 adds "-arm64", amd64 has no suffix (matches CLI behavior).
+	// Skip if the name already contains the arch suffix (e.g. "debian-arm64" from the registry index).
 	suffix := ""
-	if runtime.GOARCH == "arm64" {
+	if runtime.GOARCH == "arm64" && !strings.HasSuffix(req.Name, "-arm64") {
 		suffix = "-arm64"
 	}
 
