@@ -52,6 +52,7 @@ type vmV1Response struct {
 	LastStateChange      string          `json:"last_state_change"`
 	PortRules            []portRuleEntry `json:"port_rules"`
 	PID                  int             `json:"pid"`
+	ImageDigest          string          `json:"image_digest,omitempty"`
 }
 
 type portRuleEntry struct {
@@ -111,7 +112,8 @@ func (h *DashboardAPI) queryVMs(vmID string) ([]vmV1Response, error) {
 	query := `
 		SELECT v.id, v.name, v.status, v.maintenance_operation, v.image,
 		       v.ip_address, v.namespace, v.vcpus, v.memory_mb, v.storage_mb,
-		       COALESCE(n.name, 'default'), v.created_at, v.last_state_change
+		       COALESCE(n.name, 'default'), v.created_at, v.last_state_change,
+		       COALESCE(v.image_digest, '')
 		FROM vm v LEFT JOIN network n ON v.network_id = n.id
 		WHERE v.status != 'deleted'`
 	args := []interface{}{}
@@ -138,9 +140,10 @@ func (h *DashboardAPI) queryVMs(vmID string) ([]vmV1Response, error) {
 	for rows.Next() {
 		var v vmV1Response
 		var maintOp, image, ip, ns, netName, createdAt, lastChange sql.NullString
+		var imageDigest string
 		if err := rows.Scan(&v.ID, &v.Name, &v.Status, &maintOp, &image,
 			&ip, &ns, &v.VCPUs, &v.MemoryMB, &v.StorageMB,
-			&netName, &createdAt, &lastChange); err != nil {
+			&netName, &createdAt, &lastChange, &imageDigest); err != nil {
 			h.logger.Warn("scan VM row failed", zap.Error(err))
 			continue
 		}
@@ -152,6 +155,7 @@ func (h *DashboardAPI) queryVMs(vmID string) ([]vmV1Response, error) {
 		v.CreatedAt = createdAt.String
 		v.LastStateChange = lastChange.String
 		v.PID = pidMap[v.ID]
+		v.ImageDigest = imageDigest
 		v.PortRules = h.queryPortRules(v.ID)
 		result = append(result, v)
 	}

@@ -378,6 +378,22 @@ func (h *VM) Create(w http.ResponseWriter, r *http.Request) {
 			result.IPAddress, result.Namespace, time.Now().UTC().Format(time.RFC3339), vmid)
 	}
 
+	// Link VM to image digest for provenance tracking
+	if h.db != nil {
+		var imageDigest string
+		h.db.QueryRow("SELECT digest FROM image WHERE path = ?", req.Image).Scan(&imageDigest)
+		if imageDigest == "" {
+			// Try by name
+			imgName := filepath.Base(req.Image)
+			imgName = strings.TrimSuffix(imgName, ".rootfs.ext4")
+			imgName = strings.TrimSuffix(imgName, ".ext4")
+			h.db.QueryRow("SELECT digest FROM image WHERE name = ? LIMIT 1", imgName).Scan(&imageDigest)
+		}
+		if imageDigest != "" {
+			db.SafeExec(h.db, "UPDATE vm SET image_digest = ? WHERE id = ?", imageDigest, vmid)
+		}
+	}
+
 	db.LogAction(h.db, "create", "vm", vmid, name, fmt.Sprintf("image=%s vcpus=%d memory=%dMB", req.Image, effectiveVCPUs, effectiveMemoryMB), true)
 	writeJSON(w, http.StatusCreated, result)
 }

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"compress/gzip"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,6 +29,8 @@ type imageEntry struct {
 	SizeMB    int64  `json:"size_mb"`
 	CreatedAt string `json:"created_at"`
 	Source    string `json:"source"`
+	Digest    string `json:"digest,omitempty"`
+	Verified  bool   `json:"verified,omitempty"`
 }
 
 type registryImage struct {
@@ -54,58 +57,86 @@ const registryCacheTTL = 5 * time.Minute
 
 // --- Handlers ---
 
-// Images lists available rootfs images in the images directory.
+// Images lists available rootfs images. Reads from the image table (sha256 digest-indexed),
+// with a filesystem scan fallback for any images not yet in the DB.
 func (h *DashboardAPI) Images(w http.ResponseWriter, r *http.Request) {
 	imagesDir := filepath.Join(h.cfg.DataDir, "images")
-	entries, err := os.ReadDir(imagesDir)
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"images": []imageEntry{}})
-		return
-	}
+	var images []imageEntry
 
-	// Build set of docker-built images for source detection
-	builtImages := make(map[string]bool)
+	// Primary: read from image table
+	knownPaths := map[string]bool{}
 	if h.db != nil {
-		rows, err := h.db.Query("SELECT DISTINCT build_name FROM image_build WHERE status = 'complete'")
+		rows, err := h.db.Query(`SELECT digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at FROM image ORDER BY created_at DESC`)
 		if err == nil {
-			defer rows.Close()
 			for rows.Next() {
-				var name string
-				if rows.Scan(&name) == nil {
-					builtImages[name] = true
+				var digest, name, file, path, source string
+				var sourceRef, verifiedAt sql.NullString
+				var sizeBytes int64
+				var createdAt string
+				if rows.Scan(&digest, &name, &file, &path, &sizeBytes, &source, &sourceRef, &verifiedAt, &createdAt) != nil {
+					continue
 				}
+				// Only include images whose file still exists on disk
+				if _, statErr := os.Stat(path); statErr != nil {
+					continue
+				}
+				knownPaths[path] = true
+				images = append(images, imageEntry{
+					Name:      name,
+					File:      file,
+					Path:      path,
+					SizeMB:    sizeBytes / (1024 * 1024),
+					CreatedAt: createdAt,
+					Source:    source,
+					Digest:    digest,
+					Verified:  verifiedAt.Valid && verifiedAt.String != "",
+				})
 			}
+			rows.Close()
 		}
 	}
 
-	var images []imageEntry
+	// Fallback: scan filesystem for images not in DB (manually added files)
+	entries, _ := os.ReadDir(imagesDir)
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".ext4") {
 			continue
 		}
-		name := strings.TrimSuffix(e.Name(), ".rootfs.ext4")
-		if name == e.Name() {
-			name = strings.TrimSuffix(e.Name(), ".ext4")
+		path := filepath.Join(imagesDir, e.Name())
+		if knownPaths[path] {
+			continue
 		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
 
-		source := "registry"
-		if builtImages[name] {
-			source = "docker build"
+		name := strings.TrimSuffix(e.Name(), ".rootfs.ext4")
+		if name == e.Name() {
+			name = strings.TrimSuffix(e.Name(), ".ext4")
+		}
+
+		// Compute digest and insert into DB for future requests
+		digest := ""
+		if d, err := db.HashFile(path); err == nil {
+			digest = d
+			now := time.Now().UTC().Format(time.RFC3339)
+			h.db.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'unknown', ?, ?)",
+				digest, name, e.Name(), path, info.Size(), now, now)
+			h.db.Exec("INSERT OR IGNORE INTO image_tag (tag, digest) VALUES (?, ?)", name, digest)
 		}
 
 		images = append(images, imageEntry{
 			Name:      name,
 			File:      e.Name(),
-			Path:      filepath.Join(imagesDir, e.Name()),
+			Path:      path,
 			SizeMB:    info.Size() / (1024 * 1024),
 			CreatedAt: info.ModTime().UTC().Format(time.RFC3339),
-			Source:    source,
+			Source:    "unknown",
+			Digest:    digest,
 		})
 	}
+
 	if images == nil {
 		images = []imageEntry{}
 	}
@@ -147,6 +178,11 @@ func (h *DashboardAPI) ImageDelete(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("delete image failed", zap.String("name", name), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "failed to delete image")
 		return
+	}
+
+	// Remove from image table (image_tag rows cascade-deleted)
+	if h.db != nil {
+		h.db.Exec("DELETE FROM image WHERE path = ?", filePath)
 	}
 
 	db.LogAction(h.db, "image.delete", "image", name, name, "", true)
@@ -401,11 +437,26 @@ func (h *DashboardAPI) RegistryDownload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Register image in content-addressable store
+	imageDigest := ""
+	if digest, err := db.HashFile(outputPath); err == nil {
+		imageDigest = digest
+		info, _ := os.Stat(outputPath)
+		now := time.Now().UTC().Format(time.RFC3339)
+		var sizeBytes int64
+		if info != nil {
+			sizeBytes = info.Size()
+		}
+		h.db.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'registry', ?, ?, ?)",
+			imageDigest, req.Name, req.Name+".rootfs.ext4", outputPath, sizeBytes, req.Name, now, now)
+		h.db.Exec("INSERT OR IGNORE INTO image_tag (tag, digest) VALUES (?, ?)", req.Name, imageDigest)
+	}
+
 	// Invalidate registry cache so next fetch shows updated downloaded state
 	registryCacheMu.Lock()
 	registryCacheTime = time.Time{}
 	registryCacheMu.Unlock()
 
-	h.logger.Info("registry image downloaded", zap.String("name", req.Name), zap.String("path", outputPath))
-	writeJSON(w, http.StatusOK, map[string]string{"status": "downloaded", "name": req.Name, "path": outputPath})
+	h.logger.Info("registry image downloaded", zap.String("name", req.Name), zap.String("path", outputPath), zap.String("digest", imageDigest))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "downloaded", "name": req.Name, "path": outputPath, "digest": imageDigest})
 }

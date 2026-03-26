@@ -116,6 +116,7 @@
               <tr class="border-b border-border text-left">
                 <th class="px-5 py-3 text-xs font-medium text-muted uppercase tracking-wider">Name</th>
                 <th class="px-5 py-3 text-xs font-medium text-muted uppercase tracking-wider">Size</th>
+                <th class="px-5 py-3 text-xs font-medium text-muted uppercase tracking-wider">Digest</th>
                 <th class="px-5 py-3 text-xs font-medium text-muted uppercase tracking-wider">Source</th>
                 <th class="px-5 py-3 text-xs font-medium text-muted uppercase tracking-wider">Created</th>
                 <th class="px-5 py-3 text-xs font-medium text-muted uppercase tracking-wider">Actions</th>
@@ -126,6 +127,13 @@
                 <tr class="hover:bg-surface-hover/50 transition-colors">
                   <td class="px-5 py-3 font-medium text-text">{img.name}</td>
                   <td class="px-5 py-3 text-muted">{formatMB(img.size_mb)}</td>
+                  <td class="px-5 py-3 text-muted font-mono text-xs">
+                    {#if img.digest}
+                      <span title="sha256:{img.digest}">sha256:{img.digest.slice(0, 12)}</span>
+                    {:else}
+                      <span class="text-muted/50">-</span>
+                    {/if}
+                  </td>
                   <td class="px-5 py-3">
                     <span class="inline-block px-2 py-0.5 rounded-full text-xs font-medium {sourceStyle(img.source)}">
                       {img.source}

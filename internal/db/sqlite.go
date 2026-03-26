@@ -60,12 +60,17 @@ func New(dataDir string) (*sql.DB, error) {
 	// Schema evolution: add columns that can't use IF NOT EXISTS in SQLite ALTER TABLE.
 	addColumnIfMissing(db, "vm", "network_id", "TEXT")
 	addColumnIfMissing(db, "vm", "root_volume", "TEXT")
+	addColumnIfMissing(db, "vm", "image_digest", "TEXT")
+	addColumnIfMissing(db, "image_build", "image_digest", "TEXT")
 
 	// Restore network_id data after migration + column re-add.
 	restoreNetworkIDs(db, networkMap)
 
 	// Migrate volume index.json to SQLite if present.
 	migrateVolumeIndex(db, dataDir)
+
+	// Migrate existing images to content-addressable store (sha256 digests).
+	migrateExistingImages(db, dataDir)
 
 	return db, nil
 }
@@ -175,6 +180,163 @@ func migrateVolumeIndex(db *sql.DB, dataDir string) {
 	}
 
 	fmt.Fprintf(os.Stderr, "migrated %d volumes from index.json to SQLite\n", count)
+}
+
+// migrateExistingImages scans ~/.sistemo/images/ and populates the image + image_tag tables
+// with sha256 digests. One-time migration on first startup after upgrade to v0.7.
+func migrateExistingImages(db *sql.DB, dataDir string) {
+	imagesDir := filepath.Join(dataDir, "images")
+	sentinel := filepath.Join(imagesDir, ".digest_migrated")
+
+	// Already migrated.
+	if _, err := os.Stat(sentinel); err == nil {
+		return
+	}
+
+	// No images directory.
+	entries, err := os.ReadDir(imagesDir)
+	if err != nil {
+		return
+	}
+
+	// Build set of docker-built image names for source detection.
+	builtNames := map[string]bool{}
+	rows, err := db.Query("SELECT DISTINCT build_name FROM image_build WHERE status = 'complete'")
+	if err == nil {
+		for rows.Next() {
+			var name string
+			if rows.Scan(&name) == nil {
+				builtNames[name] = true
+			}
+		}
+		rows.Close()
+	}
+
+	count := 0
+	for _, e := range entries {
+		if e.IsDir() || (!hasExt4Suffix(e.Name())) {
+			continue
+		}
+
+		path := filepath.Join(imagesDir, e.Name())
+
+		// Skip if already in image table (by path).
+		var existing string
+		if db.QueryRow("SELECT digest FROM image WHERE path = ?", path).Scan(&existing) == nil {
+			continue
+		}
+
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+
+		// Compute sha256 (streaming).
+		fmt.Fprintf(os.Stderr, "hashing %s (%d MB)...\n", e.Name(), info.Size()/(1024*1024))
+		digest, err := HashFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to hash %s: %v\n", e.Name(), err)
+			continue
+		}
+
+		// Derive name from filename.
+		name := e.Name()
+		if idx := len(name) - len(".rootfs.ext4"); idx > 0 && name[idx:] == ".rootfs.ext4" {
+			name = name[:idx]
+		} else if idx := len(name) - len(".ext4"); idx > 0 && name[idx:] == ".ext4" {
+			name = name[:idx]
+		}
+
+		// Determine source.
+		source := "registry"
+		if builtNames[name] {
+			source = "docker_build"
+		}
+
+		now := "2006-01-02T15:04:05Z"
+		if !info.ModTime().IsZero() {
+			now = info.ModTime().UTC().Format("2006-01-02T15:04:05Z")
+		}
+
+		_, err = db.Exec(
+			"INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, verified_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			digest, name, e.Name(), path, info.Size(), source, now, now,
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to insert image %s: %v\n", name, err)
+			continue
+		}
+
+		// Create tag (name -> digest).
+		db.Exec("INSERT OR IGNORE INTO image_tag (tag, digest) VALUES (?, ?)", name, digest)
+
+		count++
+	}
+
+	// Backfill vm.image_digest for existing VMs.
+	vmRows, err := db.Query("SELECT id, image FROM vm WHERE image_digest IS NULL AND status != 'deleted'")
+	if err == nil {
+		type vmRef struct{ id, image string }
+		var refs []vmRef
+		for vmRows.Next() {
+			var r vmRef
+			if vmRows.Scan(&r.id, &r.image) == nil {
+				refs = append(refs, r)
+			}
+		}
+		vmRows.Close()
+
+		for _, r := range refs {
+			var digest string
+			// Try matching by path first, then by name.
+			if db.QueryRow("SELECT digest FROM image WHERE path = ?", r.image).Scan(&digest) != nil {
+				// Try extracting basename and matching.
+				base := filepath.Base(r.image)
+				name := base
+				if idx := len(name) - len(".rootfs.ext4"); idx > 0 && name[idx:] == ".rootfs.ext4" {
+					name = name[:idx]
+				} else if idx := len(name) - len(".ext4"); idx > 0 && name[idx:] == ".ext4" {
+					name = name[:idx]
+				}
+				db.QueryRow("SELECT digest FROM image WHERE name = ? LIMIT 1", name).Scan(&digest)
+			}
+			if digest != "" {
+				db.Exec("UPDATE vm SET image_digest = ? WHERE id = ?", digest, r.id)
+			}
+		}
+	}
+
+	// Backfill image_build.image_digest for completed builds.
+	buildRows, err := db.Query("SELECT id, build_name FROM image_build WHERE image_digest IS NULL AND status = 'complete'")
+	if err == nil {
+		type buildRef struct{ id, buildName string }
+		var brefs []buildRef
+		for buildRows.Next() {
+			var b buildRef
+			if buildRows.Scan(&b.id, &b.buildName) == nil {
+				brefs = append(brefs, b)
+			}
+		}
+		buildRows.Close()
+
+		for _, b := range brefs {
+			var digest string
+			db.QueryRow("SELECT digest FROM image WHERE name = ? LIMIT 1", b.buildName).Scan(&digest)
+			if digest != "" {
+				db.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, b.id)
+			}
+		}
+	}
+
+	// Write sentinel file.
+	os.WriteFile(sentinel, []byte(fmt.Sprintf("migrated %d images\n", count)), 0644)
+	if count > 0 {
+		fmt.Fprintf(os.Stderr, "migrated %d images to content-addressable store (sha256)\n", count)
+	}
+}
+
+func hasExt4Suffix(name string) bool {
+	return len(name) > 5 && (name[len(name)-5:] == ".ext4")
 }
 
 func runMigrations(db *sql.DB) error {
