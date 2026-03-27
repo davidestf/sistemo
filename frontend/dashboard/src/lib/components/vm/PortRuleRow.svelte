@@ -19,7 +19,7 @@
   async function handleDelete() {
     deleting = true;
     try {
-      await del(`/vms/${vmId}/expose/${rule.host_port}`);
+      await del(`/api/v1/vms/${vmId}/expose/${rule.host_port}`);
       addToast('Port rule removed', 'success');
       ondelete();
     } catch (err) {

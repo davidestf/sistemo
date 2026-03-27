@@ -82,8 +82,12 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 	buildID := fmt.Sprintf("%d", time.Now().UnixNano())
 	now := time.Now().UTC().Format(time.RFC3339)
 	if h.db != nil {
-		h.db.Exec("INSERT OR REPLACE INTO image_build (id, image, build_name, status, message, started_at) VALUES (?, ?, ?, 'building', 'Starting build...', ?)",
-			buildID, req.Image, buildName, now)
+		if _, err := h.db.Exec("INSERT OR REPLACE INTO image_build (id, image, build_name, status, message, started_at) VALUES (?, ?, ?, 'building', 'Starting build...', ?)",
+			buildID, req.Image, buildName, now); err != nil {
+			h.logger.Error("failed to insert build record", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to create build record")
+			return
+		}
 	}
 
 	imageName := req.Image
@@ -96,8 +100,10 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 					completedAt = time.Now().UTC().Format(time.RFC3339)
 				}
 				// Only update if still in 'building' state — prevents overwriting a cancelled build
-				h.db.Exec("UPDATE image_build SET status = ?, message = ?, completed_at = ? WHERE id = ? AND status = 'building'",
-					status, message, completedAt, buildID)
+				if _, err := h.db.Exec("UPDATE image_build SET status = ?, message = ?, completed_at = ? WHERE id = ? AND status = 'building'",
+					status, message, completedAt, buildID); err != nil {
+					h.logger.Warn("failed to update build status", zap.String("build_id", buildID), zap.String("status", status), zap.Error(err))
+				}
 			}
 		}
 
@@ -197,10 +203,18 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 				if info != nil {
 					sizeBytes = info.Size()
 				}
-				h.db.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'docker_build', ?, ?, ?)",
-					digest, buildName, buildName+".rootfs.ext4", outputPath, sizeBytes, imageName, now, now)
-				h.db.Exec("INSERT OR IGNORE INTO image_tag (tag, digest) VALUES (?, ?)", buildName, digest)
-				h.db.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, buildID)
+				if _, err := h.db.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'docker_build', ?, ?, ?)",
+					digest, buildName, buildName+".rootfs.ext4", outputPath, sizeBytes, imageName, now, now); err != nil {
+					h.logger.Warn("failed to register built image", zap.String("build_id", buildID), zap.Error(err))
+				}
+				if _, err := h.db.Exec("INSERT OR IGNORE INTO image_tag (tag, digest) VALUES (?, ?)", buildName, digest); err != nil {
+					h.logger.Warn("failed to insert image tag", zap.String("build_id", buildID), zap.Error(err))
+				}
+				if _, err := h.db.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, buildID); err != nil {
+					h.logger.Warn("failed to update build digest", zap.String("build_id", buildID), zap.Error(err))
+				}
+			} else {
+				h.logger.Warn("failed to hash built image", zap.String("build_id", buildID), zap.Error(hashErr))
 			}
 		}
 
@@ -291,14 +305,16 @@ func (h *DashboardAPI) ImageBuildCancel(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Kill the process if it's still running
+	// Kill the process if it's still running.
+	// Hold the lock while accessing cmd.Process to avoid a TOCTOU race
+	// where the build goroutine could modify the map between lookup and kill.
 	activeBuildsMu.Lock()
-	if cmd, ok := activeBuildsMap[buildID]; ok {
-		if cmd.Process != nil {
-			// Kill the entire process group (bash + docker + child processes)
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			h.logger.Info("killed build process group", zap.String("build_id", buildID), zap.Int("pid", cmd.Process.Pid))
-		}
+	cmd, ok := activeBuildsMap[buildID]
+	if ok && cmd.Process != nil {
+		pid := cmd.Process.Pid
+		// Kill the entire process group (bash + docker + child processes)
+		syscall.Kill(-pid, syscall.SIGKILL)
+		h.logger.Info("killed build process group", zap.String("build_id", buildID), zap.Int("pid", pid))
 	}
 	activeBuildsMu.Unlock()
 
