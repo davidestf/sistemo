@@ -51,7 +51,7 @@
     try {
       const body: Record<string, string> = { name: newName.trim() };
       if (newSubnet.trim()) body.subnet = newSubnet.trim();
-      await post('/networks', body);
+      await post('/api/v1/networks', body);
       addToast(`Network "${newName.trim()}" created`, 'success');
       newName = '';
       newSubnet = '';
@@ -72,7 +72,7 @@
     if (!deleteTarget) return;
     deleting = true;
     try {
-      await del(`/networks/${deleteTarget.name}`);
+      await del(`/api/v1/networks/${deleteTarget.name}`);
       addToast(`Network "${deleteTarget.name}" deleted`, 'success');
       deleteTarget = null;
       await fetchNetworks();

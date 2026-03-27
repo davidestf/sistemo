@@ -135,7 +135,7 @@ func NewRouter(cfg *config.Config, mgr *vm.Manager, logger *zap.Logger, db *sql.
 		r.Post("/auth/setup", authHandler.Setup)
 		r.Post("/auth/login", authHandler.Login)
 
-		// Protected endpoints
+		// Protected endpoints — reads (dashboard-enriched responses)
 		r.Get("/vms", dashAPI.ListVMs)
 		r.Get("/vms/{vmID}", dashAPI.GetVM)
 		r.Get("/system", dashAPI.System)
@@ -150,6 +150,22 @@ func NewRouter(cfg *config.Config, mgr *vm.Manager, logger *zap.Logger, db *sql.
 		r.Get("/images/build/{name}/status", dashAPI.ImageBuildStatus)
 		r.Post("/images/build/{name}/cancel", dashAPI.ImageBuildCancel)
 		r.Get("/images/builds", dashAPI.ImageBuilds)
+
+		// Protected endpoints — mutations (same handlers as legacy routes)
+		r.Post("/vms", vmHandler.Create)
+		r.Delete("/vms/{vmID}", vmHandler.Delete)
+		r.Post("/vms/{vmID}/stop", vmHandler.Stop)
+		r.Post("/vms/{vmID}/start", vmHandler.Start)
+		r.Get("/vms/{vmID}/logs", vmHandler.Logs)
+		r.Post("/vms/{vmID}/expose", vmHandler.Expose)
+		r.Delete("/vms/{vmID}/expose/{hostPort}", vmHandler.Unexpose)
+		r.Post("/vms/{vmID}/volume/attach", volumeHandler.Attach)
+		r.Post("/vms/{vmID}/volume/detach", volumeHandler.Detach)
+		r.Post("/networks", networkHandler.Create)
+		r.Delete("/networks/{name}", networkHandler.Delete)
+		r.Post("/volumes", volumeHandler.Create)
+		r.Delete("/volumes/{idOrName}", volumeHandler.Delete)
+		r.Post("/volumes/{idOrName}/resize", volumeHandler.Resize)
 	})
 
 	return r

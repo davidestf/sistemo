@@ -17,7 +17,7 @@
   async function handleStop(e: MouseEvent) {
     e.stopPropagation();
     try {
-      await post(`/vms/${vm.id}/stop`);
+      await post(`/api/v1/vms/${vm.id}/stop`);
       addToast(`"${vm.name}" stopped`, 'success');
       onrefresh?.();
     } catch (err) {
@@ -28,7 +28,7 @@
   async function handleStart(e: MouseEvent) {
     e.stopPropagation();
     try {
-      await post(`/vms/${vm.id}/start`);
+      await post(`/api/v1/vms/${vm.id}/start`);
       addToast(`"${vm.name}" started`, 'success');
       onrefresh?.();
     } catch (err) {
@@ -40,7 +40,7 @@
     e.stopPropagation();
     if (!confirm(`Delete "${vm.name}"? This cannot be undone.`)) return;
     try {
-      await del(`/vms/${vm.id}`);
+      await del(`/api/v1/vms/${vm.id}`);
       addToast(`"${vm.name}" deleted`, 'success');
       onrefresh?.();
     } catch (err) {

@@ -53,7 +53,7 @@
     e.stopPropagation();
     const action = vm.status === 'running' ? 'stop' : 'start';
     try {
-      await post(`/vms/${vm.id}/${action}`);
+      await post(`/api/v1/vms/${vm.id}/${action}`);
       addToast(`VM ${action === 'stop' ? 'stopping' : 'starting'}...`, 'info');
       await fetchVMs();
     } catch (err) {
@@ -75,7 +75,7 @@
     if (!deleteTarget) return;
     deleting = true;
     try {
-      await del(`/vms/${deleteTarget.id}`);
+      await del(`/api/v1/vms/${deleteTarget.id}`);
       addToast(`VM "${deleteTarget.name}" deleted`, 'success');
       deleteTarget = null;
       await fetchVMs();

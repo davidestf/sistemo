@@ -88,7 +88,7 @@
 
     creating = true;
     try {
-      await post('/volumes', { name: newName.trim(), size_mb: newSizeMb });
+      await post('/api/v1/volumes', { name: newName.trim(), size_mb: newSizeMb });
       addToast(`Volume "${newName.trim()}" created`, 'success');
       newName = '';
       newSizeMb = 1024;
@@ -110,7 +110,7 @@
     if (!deleteTarget) return;
     deleting = true;
     try {
-      await del(`/volumes/${deleteTarget.id}`);
+      await del(`/api/v1/volumes/${deleteTarget.id}`);
       addToast(`Volume "${deleteTarget.name}" deleted`, 'success');
       deleteTarget = null;
       await fetchData();
@@ -135,7 +135,7 @@
     }
     resizing = true;
     try {
-      await post(`/volumes/${resizeTarget.id}/resize`, { size_mb: resizeMb });
+      await post(`/api/v1/volumes/${resizeTarget.id}/resize`, { size_mb: resizeMb });
       addToast(`Volume "${resizeTarget.name}" resized to ${formatMB(resizeMb)}`, 'success');
       resizeTarget = null;
       await fetchData();
@@ -156,7 +156,7 @@
     if (!attachTarget || !attachVmId) return;
     attaching = true;
     try {
-      await post(`/vms/${attachVmId}/volume/attach`, { volume: attachTarget.id });
+      await post(`/api/v1/vms/${attachVmId}/volume/attach`, { volume: attachTarget.id });
       addToast(`Volume "${attachTarget.name}" attached`, 'success');
       attachTarget = null;
       attachVmId = '';
@@ -177,7 +177,7 @@
     if (!detachTarget || !detachTarget.attached) return;
     detaching = true;
     try {
-      await post(`/vms/${detachTarget.attached}/volume/detach`, { volume: detachTarget.id });
+      await post(`/api/v1/vms/${detachTarget.attached}/volume/detach`, { volume: detachTarget.id });
       addToast(`Volume "${detachTarget.name}" detached`, 'success');
       detachTarget = null;
       await fetchData();

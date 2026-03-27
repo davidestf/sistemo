@@ -80,7 +80,7 @@ func runStart(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	}
 	fmt.Printf("Started %s\n", vmID)
 	fmt.Printf("  IP: %s  Namespace: %s  Boot: %dms\n", resp.IPAddress, resp.Namespace, resp.BootTimeMS)
-	fmt.Printf("  Terminal: %s/terminals/vm/%s\n", baseURL, vmID)
+	fmt.Printf("  Dashboard: %s/dashboard/#/vms/%s\n", baseURL, vmID)
 	return nil
 }
 

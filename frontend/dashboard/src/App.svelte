@@ -2,6 +2,7 @@
   import Shell from './components/layout/Shell.svelte';
   import Toast from './lib/components/ui/Toast.svelte';
   import Spinner from './lib/components/ui/Spinner.svelte';
+  import ErrorBoundary from './lib/components/ui/ErrorBoundary.svelte';
   import Login from './pages/Login.svelte';
   import Setup from './pages/Setup.svelte';
   import Dashboard from './pages/Dashboard.svelte';
@@ -87,25 +88,27 @@
   <Login />
 {:else}
   <Shell {title}>
-    {#if route.page === 'dashboard'}
-      <Dashboard />
-    {:else if route.page === 'vms'}
-      <VMList />
-    {:else if route.page === 'vm-create'}
-      <VMCreate />
-    {:else if route.page === 'vm-detail'}
-      <VMDetail vmId={route.id} />
-    {:else if route.page === 'networks'}
-      <Networks />
-    {:else if route.page === 'volumes'}
-      <Volumes />
-    {:else if route.page === 'images'}
-      <Images />
-    {:else if route.page === 'history'}
-      <History />
-    {:else if route.page === 'system'}
-      <System />
-    {/if}
+    <ErrorBoundary>
+      {#if route.page === 'dashboard'}
+        <Dashboard />
+      {:else if route.page === 'vms'}
+        <VMList />
+      {:else if route.page === 'vm-create'}
+        <VMCreate />
+      {:else if route.page === 'vm-detail'}
+        <VMDetail vmId={route.id} />
+      {:else if route.page === 'networks'}
+        <Networks />
+      {:else if route.page === 'volumes'}
+        <Volumes />
+      {:else if route.page === 'images'}
+        <Images />
+      {:else if route.page === 'history'}
+        <History />
+      {:else if route.page === 'system'}
+        <System />
+      {/if}
+    </ErrorBoundary>
   </Shell>
 {/if}
 

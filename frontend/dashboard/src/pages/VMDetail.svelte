@@ -53,13 +53,16 @@
       const all = data.volumes ?? [];
       attachedVolumes = all.filter(v => v.attached === vmId);
       availableVolumes = all.filter(v => v.status === 'online' && v.role === 'data');
-    } catch { /* ignore */ }
+    } catch (err) {
+      // Only log on initial load; suppress during polling to avoid console spam
+      if (loading) console.warn('Failed to fetch volumes:', err);
+    }
   }
 
   async function handleAttach(volId: string) {
     attachingVol = true;
     try {
-      await post(`/vms/${vmId}/volume/attach`, { volume: volId });
+      await post(`/api/v1/vms/${vmId}/volume/attach`, { volume: volId });
       addToast('Volume attached', 'success');
       await fetchVolumes();
     } catch (err) {
@@ -72,7 +75,7 @@
   async function handleDetach(vol: VolumeInfo) {
     detachingId = vol.id;
     try {
-      await post(`/vms/${vmId}/volume/detach`, { volume: vol.id });
+      await post(`/api/v1/vms/${vmId}/volume/detach`, { volume: vol.id });
       addToast(`Volume "${vol.name}" detached`, 'success');
       await fetchVolumes();
     } catch (err) {
@@ -96,7 +99,7 @@
       const headers: Record<string, string> = {};
       const token = getToken();
       if (token) headers['Authorization'] = `Bearer ${token}`;
-      const response = await fetch(`/vms/${vmId}/logs`, { headers });
+      const response = await fetch(`/api/v1/vms/${vmId}/logs`, { headers });
       if (response.ok) {
         logs = await response.text();
       } else {
@@ -128,7 +131,7 @@
     if (!vm) return;
     const action = vm.status === 'running' ? 'stop' : 'start';
     try {
-      await post(`/vms/${vm.id}/${action}`);
+      await post(`/api/v1/vms/${vm.id}/${action}`);
       addToast(`VM ${action === 'stop' ? 'stopping' : 'starting'}...`, 'info');
       await fetchVM();
     } catch (err) {
@@ -140,7 +143,7 @@
     if (!vm) return;
     deleting = true;
     try {
-      await del(`/vms/${vm.id}`);
+      await del(`/api/v1/vms/${vm.id}`);
       addToast(`VM "${vm.name}" deleted`, 'success');
       window.location.hash = '#/vms';
     } catch (err) {

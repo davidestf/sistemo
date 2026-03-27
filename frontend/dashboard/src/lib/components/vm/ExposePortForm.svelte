@@ -32,7 +32,7 @@
 
     submitting = true;
     try {
-      await post(`/vms/${vmId}/expose`, {
+      await post(`/api/v1/vms/${vmId}/expose`, {
         host_port: hp,
         vm_port: vp,
         protocol: 'tcp',

@@ -222,7 +222,16 @@
 
   function startDownloadPolling(img: RegistryImage) {
     if (downloadPollTimer) clearInterval(downloadPollTimer);
+    let pollCount = 0;
+    const maxPolls = 200; // 200 * 3s = 10 minutes max
     downloadPollTimer = setInterval(async () => {
+      pollCount++;
+      if (pollCount > maxPolls) {
+        if (downloadPollTimer) { clearInterval(downloadPollTimer); downloadPollTimer = null; }
+        downloadingImage = null;
+        addToast(`Download of "${img.name}" timed out`, 'error');
+        return;
+      }
       try {
         const regData = await get<{ images: RegistryImage[] }>('/api/v1/registry');
         const updated = (regData.images ?? []).find(i => i.name === img.name);
@@ -298,7 +307,7 @@
         body.attached_storage = selectedVolumes;
       }
 
-      const result = await post<{ vm_id: string }>('/vms', body);
+      const result = await post<{ vm_id: string }>('/api/v1/vms', body);
       addToast('VM deployed successfully', 'success');
       window.location.hash = '#/vms';
     } catch (err) {

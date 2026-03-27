@@ -15,6 +15,7 @@ type IPRateLimiter struct {
 	mu       sync.Mutex
 	rate     rate.Limit
 	burst    int
+	done     chan struct{}
 }
 
 type visitorEntry struct {
@@ -28,9 +29,15 @@ func NewIPRateLimiter(rps float64, burst int) *IPRateLimiter {
 		visitors: make(map[string]*visitorEntry),
 		rate:     rate.Limit(rps),
 		burst:    burst,
+		done:     make(chan struct{}),
 	}
 	go rl.cleanup()
 	return rl
+}
+
+// Stop terminates the background cleanup goroutine.
+func (rl *IPRateLimiter) Stop() {
+	close(rl.done)
 }
 
 func (rl *IPRateLimiter) getLimiter(ip string) *rate.Limiter {
@@ -48,15 +55,21 @@ func (rl *IPRateLimiter) getLimiter(ip string) *rate.Limiter {
 
 // cleanup removes stale entries every 3 minutes.
 func (rl *IPRateLimiter) cleanup() {
+	ticker := time.NewTicker(3 * time.Minute)
+	defer ticker.Stop()
 	for {
-		time.Sleep(3 * time.Minute)
-		rl.mu.Lock()
-		for ip, v := range rl.visitors {
-			if time.Since(v.lastSeen) > 5*time.Minute {
-				delete(rl.visitors, ip)
+		select {
+		case <-rl.done:
+			return
+		case <-ticker.C:
+			rl.mu.Lock()
+			for ip, v := range rl.visitors {
+				if time.Since(v.lastSeen) > 5*time.Minute {
+					delete(rl.visitors, ip)
+				}
 			}
+			rl.mu.Unlock()
 		}
-		rl.mu.Unlock()
 	}
 }
 

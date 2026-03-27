@@ -18,10 +18,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': 'http://localhost:7777',
-      '/vms': 'http://localhost:7777',
-      '/volumes': 'http://localhost:7777',
       '/health': 'http://localhost:7777',
-      '/networks': 'http://localhost:7777',
       '/terminals': { target: 'http://localhost:7777', ws: true },
     },
   },

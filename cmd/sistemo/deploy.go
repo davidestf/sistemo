@@ -383,7 +383,7 @@ func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memory
 	if networkName != "" {
 		fmt.Printf("  Network: %s\n", networkName)
 	}
-	fmt.Printf("  Terminal: %s/terminals/vm/%s\n", baseURL, resp.VMID)
+	fmt.Printf("  Dashboard: %s/dashboard/#/vms/%s\n", baseURL, resp.VMID)
 
 	// Expose ports if requested
 	for _, portSpec := range exposePorts {
