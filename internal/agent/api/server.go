@@ -14,7 +14,7 @@ import (
 	"github.com/davidestf/sistemo/internal/agent/api/handlers"
 	agentmw "github.com/davidestf/sistemo/internal/agent/api/middleware"
 	"github.com/davidestf/sistemo/internal/agent/config"
-	"github.com/davidestf/sistemo/internal/agent/vm"
+	"github.com/davidestf/sistemo/internal/agent/machine"
 	dbpkg "github.com/davidestf/sistemo/internal/db"
 	"go.uber.org/zap"
 )
@@ -27,7 +27,7 @@ type RouterOpts struct {
 
 // NewRouter builds the HTTP router with authentication middleware.
 // jwtSecret is the HMAC key for signing/verifying dashboard JWTs.
-func NewRouter(cfg *config.Config, mgr *vm.Manager, logger *zap.Logger, db *sql.DB, jwtSecret []byte, opts ...RouterOpts) http.Handler {
+func NewRouter(cfg *config.Config, mgr *machine.Manager, logger *zap.Logger, db *sql.DB, jwtSecret []byte, opts ...RouterOpts) http.Handler {
 	r := chi.NewRouter()
 
 	// Global middleware
@@ -68,7 +68,7 @@ func NewRouter(cfg *config.Config, mgr *vm.Manager, logger *zap.Logger, db *sql.
 	}
 
 	// Handler groups
-	vmHandler := handlers.NewVM(mgr, cfg, logger, db)
+	machineHandler := handlers.NewMachine(mgr, cfg, logger, db)
 	terminalHandler := handlers.NewTerminal(mgr, cfg, logger, db)
 	healthHandler := handlers.NewHealth(mgr, cfg, logger)
 	networkHandler := handlers.NewNetwork(logger, db)
@@ -85,42 +85,41 @@ func NewRouter(cfg *config.Config, mgr *vm.Manager, logger *zap.Logger, db *sql.
 		adminExistsCache.Store(true)
 	})
 
-	// Routes
+	// Non-versioned routes (infrastructure, not API)
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"service":"sistemo","docs":"/health /vms /terminals/vm/:id","dashboard":"/dashboard"}`))
+		w.Write([]byte(`{"service":"sistemo","api":"/api/v1/","dashboard":"/dashboard/"}`))
 	})
 	r.Head("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	r.Get("/health", healthHandler.Health)
 	r.Get("/ready", healthHandler.Ready)
 	r.Get("/info", healthHandler.Info)
+	r.Get("/terminals/machine/{machineID}", terminalHandler.TerminalPageOrWebSocket)
 
-	r.Post("/vms", vmHandler.Create)
-	r.Delete("/vms/{vmID}", vmHandler.Delete)
-	r.Post("/vms/{vmID}/stop", vmHandler.Stop)
-	r.Post("/vms/{vmID}/start", vmHandler.Start)
-	r.Get("/vms/{vmID}/ip", vmHandler.GetIP)
-	r.Get("/vms/{vmID}/logs", vmHandler.Logs)
-	r.Get("/vms", vmHandler.List)
-	r.Post("/vms/{vmID}/exec", vmHandler.Exec)
-	r.Post("/vms/{vmID}/expose", vmHandler.Expose)
-	r.Delete("/vms/{vmID}/expose/{hostPort}", vmHandler.Unexpose)
-
-	r.Get("/terminals/vm/{vmID}", terminalHandler.TerminalPageOrWebSocket)
-	r.Post("/vms/{vmID}/terminal-session", terminalHandler.CreateSession)
-
-	r.Post("/networks", networkHandler.Create)
-	r.Get("/networks", networkHandler.List)
-	r.Delete("/networks/{name}", networkHandler.Delete)
-
-	r.Get("/volumes", volumeHandler.List)
-	r.Post("/volumes", volumeHandler.Create)
-	r.Get("/volumes/{idOrName}", volumeHandler.Get)
-	r.Delete("/volumes/{idOrName}", volumeHandler.Delete)
-	r.Post("/volumes/{idOrName}/resize", volumeHandler.Resize)
-	r.Post("/vms/{vmID}/volume/attach", volumeHandler.Attach)
-	r.Post("/vms/{vmID}/volume/detach", volumeHandler.Detach)
+	// Legacy routes — deprecated, will be removed in v2.0.
+	// Clients should migrate to /api/v1/ equivalents.
+	r.Post("/machines", deprecatedRoute(machineHandler.Create))
+	r.Delete("/machines/{machineID}", deprecatedRoute(machineHandler.Delete))
+	r.Post("/machines/{machineID}/stop", deprecatedRoute(machineHandler.Stop))
+	r.Post("/machines/{machineID}/start", deprecatedRoute(machineHandler.Start))
+	r.Get("/machines/{machineID}/ip", deprecatedRoute(machineHandler.GetIP))
+	r.Get("/machines/{machineID}/logs", deprecatedRoute(machineHandler.Logs))
+	r.Get("/machines", deprecatedRoute(machineHandler.List))
+	r.Post("/machines/{machineID}/exec", deprecatedRoute(machineHandler.Exec))
+	r.Post("/machines/{machineID}/expose", deprecatedRoute(machineHandler.Expose))
+	r.Delete("/machines/{machineID}/expose/{hostPort}", deprecatedRoute(machineHandler.Unexpose))
+	r.Post("/machines/{machineID}/terminal-session", deprecatedRoute(terminalHandler.CreateSession))
+	r.Post("/networks", deprecatedRoute(networkHandler.Create))
+	r.Get("/networks", deprecatedRoute(networkHandler.List))
+	r.Delete("/networks/{name}", deprecatedRoute(networkHandler.Delete))
+	r.Get("/volumes", deprecatedRoute(volumeHandler.List))
+	r.Post("/volumes", deprecatedRoute(volumeHandler.Create))
+	r.Get("/volumes/{idOrName}", deprecatedRoute(volumeHandler.Get))
+	r.Delete("/volumes/{idOrName}", deprecatedRoute(volumeHandler.Delete))
+	r.Post("/volumes/{idOrName}/resize", deprecatedRoute(volumeHandler.Resize))
+	r.Post("/machines/{machineID}/volume/attach", deprecatedRoute(volumeHandler.Attach))
+	r.Post("/machines/{machineID}/volume/detach", deprecatedRoute(volumeHandler.Detach))
 
 	// Dashboard SPA — embedded Svelte app
 	dashSPA := DashboardHandler()
@@ -136,8 +135,8 @@ func NewRouter(cfg *config.Config, mgr *vm.Manager, logger *zap.Logger, db *sql.
 		r.Post("/auth/login", authHandler.Login)
 
 		// Protected endpoints — reads (dashboard-enriched responses)
-		r.Get("/vms", dashAPI.ListVMs)
-		r.Get("/vms/{vmID}", dashAPI.GetVM)
+		r.Get("/machines", dashAPI.ListMachines)
+		r.Get("/machines/{machineID}", dashAPI.GetMachine)
 		r.Get("/system", dashAPI.System)
 		r.Get("/audit-log", dashAPI.AuditLog)
 		r.Get("/images", dashAPI.Images)
@@ -151,22 +150,37 @@ func NewRouter(cfg *config.Config, mgr *vm.Manager, logger *zap.Logger, db *sql.
 		r.Post("/images/build/{name}/cancel", dashAPI.ImageBuildCancel)
 		r.Get("/images/builds", dashAPI.ImageBuilds)
 
-		// Protected endpoints — mutations (same handlers as legacy routes)
-		r.Post("/vms", vmHandler.Create)
-		r.Delete("/vms/{vmID}", vmHandler.Delete)
-		r.Post("/vms/{vmID}/stop", vmHandler.Stop)
-		r.Post("/vms/{vmID}/start", vmHandler.Start)
-		r.Get("/vms/{vmID}/logs", vmHandler.Logs)
-		r.Post("/vms/{vmID}/expose", vmHandler.Expose)
-		r.Delete("/vms/{vmID}/expose/{hostPort}", vmHandler.Unexpose)
-		r.Post("/vms/{vmID}/volume/attach", volumeHandler.Attach)
-		r.Post("/vms/{vmID}/volume/detach", volumeHandler.Detach)
+		// Protected endpoints — mutations
+		r.Post("/machines", machineHandler.Create)
+		r.Delete("/machines/{machineID}", machineHandler.Delete)
+		r.Post("/machines/{machineID}/stop", machineHandler.Stop)
+		r.Post("/machines/{machineID}/start", machineHandler.Start)
+		r.Get("/machines/{machineID}/ip", machineHandler.GetIP)
+		r.Get("/machines/{machineID}/logs", machineHandler.Logs)
+		r.Post("/machines/{machineID}/exec", machineHandler.Exec)
+		r.Post("/machines/{machineID}/expose", machineHandler.Expose)
+		r.Delete("/machines/{machineID}/expose/{hostPort}", machineHandler.Unexpose)
+		r.Post("/machines/{machineID}/terminal-session", terminalHandler.CreateSession)
+		r.Post("/machines/{machineID}/volume/attach", volumeHandler.Attach)
+		r.Post("/machines/{machineID}/volume/detach", volumeHandler.Detach)
 		r.Post("/networks", networkHandler.Create)
 		r.Delete("/networks/{name}", networkHandler.Delete)
+		r.Get("/volumes/{idOrName}", volumeHandler.Get)
 		r.Post("/volumes", volumeHandler.Create)
 		r.Delete("/volumes/{idOrName}", volumeHandler.Delete)
 		r.Post("/volumes/{idOrName}/resize", volumeHandler.Resize)
 	})
 
 	return r
+}
+
+// deprecatedRoute wraps a handler with HTTP deprecation headers (RFC 8594).
+// Legacy routes remain functional but signal they will be removed in v2.0.
+func deprecatedRoute(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Deprecation", "true")
+		w.Header().Set("Sunset", "Sat, 01 Jan 2028 00:00:00 GMT")
+		w.Header().Set("Link", `</api/v1/>; rel="successor-version"`)
+		next(w, r)
+	}
 }

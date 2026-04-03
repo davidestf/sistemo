@@ -13,7 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/davidestf/sistemo/internal/agent/config"
-	"github.com/davidestf/sistemo/internal/agent/vm"
+	"github.com/davidestf/sistemo/internal/agent/machine"
 	"github.com/davidestf/sistemo/internal/db"
 )
 
@@ -36,13 +36,13 @@ func setupDashboardRouter(t *testing.T) (*chi.Mux, *sql.DB, *config.Config) {
 		MaxStorageMB:  1048576,
 	}
 
-	mgr := vm.NewTestManager()
+	mgr := machine.NewTestManager()
 	logger := zap.NewNop()
 	api := NewDashboardAPI(mgr, cfg, database, logger)
 
 	r := chi.NewRouter()
-	r.Get("/api/v1/vms", api.ListVMs)
-	r.Get("/api/v1/vms/{vmID}", api.GetVM)
+	r.Get("/api/v1/machines", api.ListMachines)
+	r.Get("/api/v1/machines/{machineID}", api.GetMachine)
 	r.Get("/api/v1/system", api.System)
 	r.Get("/api/v1/audit", api.AuditLog)
 	r.Get("/api/v1/images", api.Images)
@@ -78,16 +78,16 @@ func dashboardDecodeJSON(t *testing.T, rec *httptest.ResponseRecorder) map[strin
 	return result
 }
 
-// insertTestVM inserts a VM row into the database for testing.
-func insertTestVM(t *testing.T, database *sql.DB, id, name, status, image string) {
+// insertTestMachine inserts a machine row into the database for testing.
+func insertTestMachine(t *testing.T, database *sql.DB, id, name, status, image string) {
 	t.Helper()
 	_, err := database.Exec(
-		`INSERT INTO vm (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
+		`INSERT INTO machine (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
 		 VALUES (?, ?, ?, ?, 2, 512, 2048, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 		id, name, status, image,
 	)
 	if err != nil {
-		t.Fatalf("insert test VM %q: %v", name, err)
+		t.Fatalf("insert test machine %q: %v", name, err)
 	}
 }
 
@@ -108,114 +108,114 @@ func insertTestAuditEntry(t *testing.T, database *sql.DB, action, targetType, ta
 	}
 }
 
-// --- VM List Tests ---
+// --- Machine List Tests ---
 
-func TestListVMs_Empty(t *testing.T) {
+func TestListMachines_Empty(t *testing.T) {
 	router, _, _ := setupDashboardRouter(t)
 
-	rec := dashboardGet(t, router, "/api/v1/vms")
+	rec := dashboardGet(t, router, "/api/v1/machines")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
 	body := dashboardDecodeJSON(t, rec)
-	vms, ok := body["vms"].([]interface{})
+	machines, ok := body["machines"].([]interface{})
 	if !ok {
-		t.Fatalf("vms field is not an array: %v", body["vms"])
+		t.Fatalf("machines field is not an array: %v", body["machines"])
 	}
-	if len(vms) != 0 {
-		t.Errorf("vms count = %d, want 0", len(vms))
+	if len(machines) != 0 {
+		t.Errorf("machines count = %d, want 0", len(machines))
 	}
 }
 
-func TestListVMs_WithData(t *testing.T) {
+func TestListMachines_WithData(t *testing.T) {
 	router, database, _ := setupDashboardRouter(t)
 
-	insertTestVM(t, database, "vm-001", "web-server", "running", "debian")
-	insertTestVM(t, database, "vm-002", "db-server", "stopped", "ubuntu")
+	insertTestMachine(t, database, "m-001", "web-server", "running", "debian")
+	insertTestMachine(t, database, "m-002", "db-server", "stopped", "ubuntu")
 
-	rec := dashboardGet(t, router, "/api/v1/vms")
+	rec := dashboardGet(t, router, "/api/v1/machines")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
 	body := dashboardDecodeJSON(t, rec)
-	vms, ok := body["vms"].([]interface{})
+	machines, ok := body["machines"].([]interface{})
 	if !ok {
-		t.Fatalf("vms field is not an array: %v", body["vms"])
+		t.Fatalf("machines field is not an array: %v", body["machines"])
 	}
-	if len(vms) != 2 {
-		t.Errorf("vms count = %d, want 2", len(vms))
+	if len(machines) != 2 {
+		t.Errorf("machines count = %d, want 2", len(machines))
 	}
 
-	// Check response shape of first VM
-	first := vms[0].(map[string]interface{})
+	// Check response shape of first machine
+	first := machines[0].(map[string]interface{})
 	requiredFields := []string{"id", "name", "status", "image", "vcpus", "memory_mb", "storage_mb", "created_at", "last_state_change", "port_rules", "pid", "network_name"}
 	for _, field := range requiredFields {
 		if _, exists := first[field]; !exists {
-			t.Errorf("VM response missing field %q", field)
+			t.Errorf("machine response missing field %q", field)
 		}
 	}
 }
 
-func TestListVMs_ExcludesDeleted(t *testing.T) {
+func TestListMachines_ExcludesDeleted(t *testing.T) {
 	router, database, _ := setupDashboardRouter(t)
 
-	insertTestVM(t, database, "vm-001", "alive-vm", "running", "debian")
-	insertTestVM(t, database, "vm-002", "dead-vm", "deleted", "debian")
+	insertTestMachine(t, database, "m-001", "alive-machine", "running", "debian")
+	insertTestMachine(t, database, "m-002", "dead-machine", "deleted", "debian")
 
-	rec := dashboardGet(t, router, "/api/v1/vms")
+	rec := dashboardGet(t, router, "/api/v1/machines")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
 	body := dashboardDecodeJSON(t, rec)
-	vms := body["vms"].([]interface{})
-	if len(vms) != 1 {
-		t.Errorf("vms count = %d, want 1 (deleted excluded)", len(vms))
+	machines := body["machines"].([]interface{})
+	if len(machines) != 1 {
+		t.Errorf("machines count = %d, want 1 (deleted excluded)", len(machines))
 	}
-	vm := vms[0].(map[string]interface{})
-	if vm["name"] != "alive-vm" {
-		t.Errorf("vm name = %q, want alive-vm", vm["name"])
+	m := machines[0].(map[string]interface{})
+	if m["name"] != "alive-machine" {
+		t.Errorf("machine name = %q, want alive-machine", m["name"])
 	}
 }
 
-func TestGetVM_Found(t *testing.T) {
+func TestGetMachine_Found(t *testing.T) {
 	router, database, _ := setupDashboardRouter(t)
 
-	insertTestVM(t, database, "vm-001", "web-server", "running", "debian")
+	insertTestMachine(t, database, "m-001", "web-server", "running", "debian")
 
-	rec := dashboardGet(t, router, "/api/v1/vms/vm-001")
+	rec := dashboardGet(t, router, "/api/v1/machines/m-001")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
 	body := dashboardDecodeJSON(t, rec)
-	if body["id"] != "vm-001" {
-		t.Errorf("id = %v, want vm-001", body["id"])
+	if body["id"] != "m-001" {
+		t.Errorf("id = %v, want m-001", body["id"])
 	}
 	if body["name"] != "web-server" {
 		t.Errorf("name = %v, want web-server", body["name"])
 	}
 }
 
-func TestGetVM_NotFound(t *testing.T) {
+func TestGetMachine_NotFound(t *testing.T) {
 	router, _, _ := setupDashboardRouter(t)
 
-	rec := dashboardGet(t, router, "/api/v1/vms/nonexistent")
+	rec := dashboardGet(t, router, "/api/v1/machines/nonexistent")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 }
 
-func TestGetVM_DeletedNotFound(t *testing.T) {
+func TestGetMachine_DeletedNotFound(t *testing.T) {
 	router, database, _ := setupDashboardRouter(t)
 
-	insertTestVM(t, database, "vm-001", "deleted-vm", "deleted", "debian")
+	insertTestMachine(t, database, "m-001", "deleted-machine", "deleted", "debian")
 
-	rec := dashboardGet(t, router, "/api/v1/vms/vm-001")
+	rec := dashboardGet(t, router, "/api/v1/machines/m-001")
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d (deleted VM should not be found)", rec.Code, http.StatusNotFound)
+		t.Fatalf("status = %d, want %d (deleted machine should not be found)", rec.Code, http.StatusNotFound)
 	}
 }
 
@@ -295,14 +295,14 @@ func TestSystem_ResponseShape(t *testing.T) {
 	}
 }
 
-func TestSystem_StatsReflectVMs(t *testing.T) {
+func TestSystem_StatsReflectMachines(t *testing.T) {
 	router, database, _ := setupDashboardRouter(t)
 
-	insertTestVM(t, database, "vm-001", "vm1", "running", "debian")
-	insertTestVM(t, database, "vm-002", "vm2", "running", "debian")
-	insertTestVM(t, database, "vm-003", "vm3", "stopped", "debian")
-	insertTestVM(t, database, "vm-004", "vm4", "error", "debian")
-	insertTestVM(t, database, "vm-005", "vm5", "deleted", "debian")
+	insertTestMachine(t, database, "m-001", "m1", "running", "debian")
+	insertTestMachine(t, database, "m-002", "m2", "running", "debian")
+	insertTestMachine(t, database, "m-003", "m3", "stopped", "debian")
+	insertTestMachine(t, database, "m-004", "m4", "error", "debian")
+	insertTestMachine(t, database, "m-005", "m5", "deleted", "debian")
 
 	rec := dashboardGet(t, router, "/api/v1/system")
 	body := dashboardDecodeJSON(t, rec)
@@ -329,7 +329,7 @@ func TestAuditLog_Default(t *testing.T) {
 	router, database, _ := setupDashboardRouter(t)
 
 	for i := 0; i < 5; i++ {
-		insertTestAuditEntry(t, database, "vm.create", "vm", "vm-id", "test-vm", "created", true)
+		insertTestAuditEntry(t, database, "machine.create", "machine", "m-id", "test-machine", "created", true)
 	}
 
 	rec := dashboardGet(t, router, "/api/v1/audit")
@@ -379,7 +379,7 @@ func TestAuditLog_Pagination(t *testing.T) {
 	router, database, _ := setupDashboardRouter(t)
 
 	for i := 0; i < 20; i++ {
-		insertTestAuditEntry(t, database, "vm.create", "vm", "vm-id", "test-vm", "created", true)
+		insertTestAuditEntry(t, database, "machine.create", "machine", "m-id", "test-machine", "created", true)
 	}
 
 	// Request with offset=10, limit=5
@@ -402,12 +402,12 @@ func TestAuditLog_Pagination(t *testing.T) {
 func TestAuditLog_FilterByAction(t *testing.T) {
 	router, database, _ := setupDashboardRouter(t)
 
-	insertTestAuditEntry(t, database, "vm.create", "vm", "vm-001", "vm1", "created", true)
-	insertTestAuditEntry(t, database, "vm.create", "vm", "vm-002", "vm2", "created", true)
-	insertTestAuditEntry(t, database, "vm.delete", "vm", "vm-003", "vm3", "deleted", true)
+	insertTestAuditEntry(t, database, "machine.create", "machine", "m-001", "m1", "created", true)
+	insertTestAuditEntry(t, database, "machine.create", "machine", "m-002", "m2", "created", true)
+	insertTestAuditEntry(t, database, "machine.delete", "machine", "m-003", "m3", "deleted", true)
 	insertTestAuditEntry(t, database, "admin.login", "auth", "", "admin", "login", true)
 
-	rec := dashboardGet(t, router, "/api/v1/audit?action=vm.create")
+	rec := dashboardGet(t, router, "/api/v1/audit?action=machine.create")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -415,7 +415,7 @@ func TestAuditLog_FilterByAction(t *testing.T) {
 	body := dashboardDecodeJSON(t, rec)
 	entries := body["entries"].([]interface{})
 	if len(entries) != 2 {
-		t.Errorf("filtered entries = %d, want 2 (only vm.create)", len(entries))
+		t.Errorf("filtered entries = %d, want 2 (only machine.create)", len(entries))
 	}
 	total := body["total"].(float64)
 	if total != 2 {
@@ -424,8 +424,8 @@ func TestAuditLog_FilterByAction(t *testing.T) {
 
 	for _, e := range entries {
 		entry := e.(map[string]interface{})
-		if entry["action"] != "vm.create" {
-			t.Errorf("entry action = %v, want vm.create", entry["action"])
+		if entry["action"] != "machine.create" {
+			t.Errorf("entry action = %v, want machine.create", entry["action"])
 		}
 	}
 }
@@ -540,8 +540,8 @@ func TestImageDelete_Success(t *testing.T) {
 	}
 }
 
-// Images are templates — VMs get their own root volume copy.
-// Deleting an image is always safe regardless of running VMs.
+// Images are templates — machines get their own root volume copy.
+// Deleting an image is always safe regardless of running machines.
 // (Previously tested for 409 conflict but that check was removed.)
 
 // --- Volume Tests ---
@@ -627,20 +627,20 @@ func TestNetworks_WithCustom(t *testing.T) {
 	}
 }
 
-func TestNetworks_VMCount(t *testing.T) {
+func TestNetworks_MachineCount(t *testing.T) {
 	router, database, _ := setupDashboardRouter(t)
 
-	// Insert VMs on default network (no network_id)
-	insertTestVM(t, database, "vm-001", "vm1", "running", "debian")
-	insertTestVM(t, database, "vm-002", "vm2", "running", "debian")
-	insertTestVM(t, database, "vm-003", "vm3", "deleted", "debian") // deleted, shouldn't count
+	// Insert machines on default network (no network_id)
+	insertTestMachine(t, database, "m-001", "m1", "running", "debian")
+	insertTestMachine(t, database, "m-002", "m2", "running", "debian")
+	insertTestMachine(t, database, "m-003", "m3", "deleted", "debian") // deleted, shouldn't count
 
 	rec := dashboardGet(t, router, "/api/v1/networks")
 	body := dashboardDecodeJSON(t, rec)
 	networks := body["networks"].([]interface{})
 	defaultNet := networks[0].(map[string]interface{})
-	vmCount := defaultNet["vm_count"].(float64)
-	if vmCount != 2 {
-		t.Errorf("default network vm_count = %v, want 2 (excludes deleted)", vmCount)
+	machineCount := defaultNet["machine_count"].(float64)
+	if machineCount != 2 {
+		t.Errorf("default network machine_count = %v, want 2 (excludes deleted)", machineCount)
 	}
 }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { VM, VolumeInfo } from '$lib/api/types';
+  import type { Machine, VolumeInfo } from '$lib/api/types';
   import { get, post, del } from '$lib/api/client';
   import { getToken } from '$lib/stores/auth.svelte';
   import { imageName, formatMB, formatDate, timeAgo } from '$lib/utils/format';
@@ -10,12 +10,12 @@
   import Spinner from '$lib/components/ui/Spinner.svelte';
   import Modal from '$lib/components/ui/Modal.svelte';
   import Terminal from '../components/terminal/Terminal.svelte';
-  import PortRuleRow from '$lib/components/vm/PortRuleRow.svelte';
-  import ExposePortForm from '$lib/components/vm/ExposePortForm.svelte';
+  import PortRuleRow from '$lib/components/machine/PortRuleRow.svelte';
+  import ExposePortForm from '$lib/components/machine/ExposePortForm.svelte';
 
-  let { vmId }: { vmId: string } = $props();
+  let { machineId }: { machineId: string } = $props();
 
-  let vm = $state<VM | null>(null);
+  let machine = $state<Machine | null>(null);
   let loading = $state(true);
   let error = $state<string | undefined>();
   let activeTab = $state<'terminal' | 'logs' | 'ports' | 'volumes' | 'config'>('terminal');
@@ -29,18 +29,18 @@
   let detachingId = $state<string | null>(null);
   let attachingVol = $state(false);
 
-  async function fetchVM() {
+  async function fetchMachine() {
     try {
-      const data = await get<VM>(`/api/v1/vms/${vmId}`);
-      const wasNull = vm === null;
-      vm = data;
+      const data = await get<Machine>(`/api/v1/machines/${machineId}`);
+      const wasNull = machine === null;
+      machine = data;
       // Set default tab based on status on first load
       if (wasNull) {
-        activeTab = vm.status === 'running' ? 'terminal' : 'config';
+        activeTab = machine.status === 'running' ? 'terminal' : 'config';
       }
     } catch (err) {
       if (loading) {
-        error = err instanceof Error ? err.message : 'Failed to load VM';
+        error = err instanceof Error ? err.message : 'Failed to load machine';
       }
     } finally {
       if (loading) loading = false;
@@ -51,7 +51,7 @@
     try {
       const data = await get<{ volumes: VolumeInfo[] }>('/api/v1/volumes');
       const all = data.volumes ?? [];
-      attachedVolumes = all.filter(v => v.attached === vmId);
+      attachedVolumes = all.filter(v => v.machine_id === machineId);
       availableVolumes = all.filter(v => v.status === 'online' && v.role === 'data');
     } catch (err) {
       // Only log on initial load; suppress during polling to avoid console spam
@@ -62,7 +62,7 @@
   async function handleAttach(volId: string) {
     attachingVol = true;
     try {
-      await post(`/api/v1/vms/${vmId}/volume/attach`, { volume: volId });
+      await post(`/api/v1/machines/${machineId}/volume/attach`, { volume: volId });
       addToast('Volume attached', 'success');
       await fetchVolumes();
     } catch (err) {
@@ -75,7 +75,7 @@
   async function handleDetach(vol: VolumeInfo) {
     detachingId = vol.id;
     try {
-      await post(`/api/v1/vms/${vmId}/volume/detach`, { volume: vol.id });
+      await post(`/api/v1/machines/${machineId}/volume/detach`, { volume: vol.id });
       addToast(`Volume "${vol.name}" detached`, 'success');
       await fetchVolumes();
     } catch (err) {
@@ -86,9 +86,9 @@
   }
 
   $effect(() => {
-    fetchVM();
+    fetchMachine();
     fetchVolumes();
-    const interval = setInterval(() => { fetchVM(); fetchVolumes(); }, 5000);
+    const interval = setInterval(() => { fetchMachine(); fetchVolumes(); }, 5000);
     return () => clearInterval(interval);
   });
 
@@ -99,7 +99,7 @@
       const headers: Record<string, string> = {};
       const token = getToken();
       if (token) headers['Authorization'] = `Bearer ${token}`;
-      const response = await fetch(`/api/v1/vms/${vmId}/logs`, { headers });
+      const response = await fetch(`/api/v1/machines/${machineId}/logs`, { headers });
       if (response.ok) {
         logs = await response.text();
       } else {
@@ -127,27 +127,27 @@
     }
   });
 
-  async function toggleVM() {
-    if (!vm) return;
-    const action = vm.status === 'running' ? 'stop' : 'start';
+  async function toggleMachine() {
+    if (!machine) return;
+    const action = machine.status === 'running' ? 'stop' : 'start';
     try {
-      await post(`/api/v1/vms/${vm.id}/${action}`);
-      addToast(`VM ${action === 'stop' ? 'stopping' : 'starting'}...`, 'info');
-      await fetchVM();
+      await post(`/api/v1/machines/${machine.id}/${action}`);
+      addToast(`Machine ${action === 'stop' ? 'stopping' : 'starting'}...`, 'info');
+      await fetchMachine();
     } catch (err) {
-      addToast(err instanceof Error ? err.message : `Failed to ${action} VM`, 'error');
+      addToast(err instanceof Error ? err.message : `Failed to ${action} machine`, 'error');
     }
   }
 
   async function handleDelete() {
-    if (!vm) return;
+    if (!machine) return;
     deleting = true;
     try {
-      await del(`/api/v1/vms/${vm.id}`);
-      addToast(`VM "${vm.name}" deleted`, 'success');
-      window.location.hash = '#/vms';
+      await del(`/api/v1/machines/${machine.id}`);
+      addToast(`Machine "${machine.name}" deleted`, 'success');
+      window.location.hash = '#/machines';
     } catch (err) {
-      addToast(err instanceof Error ? err.message : 'Failed to delete VM', 'error');
+      addToast(err instanceof Error ? err.message : 'Failed to delete machine', 'error');
     } finally {
       deleting = false;
       showDeleteModal = false;
@@ -155,7 +155,7 @@
   }
 
   function handlePortsChanged() {
-    fetchVM();
+    fetchMachine();
   }
 
   const tabs: Array<{ key: typeof activeTab; label: string }> = [
@@ -174,29 +174,29 @@
 {:else if error}
   <div class="flex flex-col items-center gap-3 py-20">
     <p class="text-error text-sm">{error}</p>
-    <a href="#/vms" class="text-accent text-sm hover:underline">Back to VMs</a>
+    <a href="#/machines" class="text-accent text-sm hover:underline">Back to Machines</a>
   </div>
-{:else if vm}
+{:else if machine}
   <!-- Header -->
   <div class="flex items-start justify-between mb-6">
     <div>
       <div class="flex items-center gap-3 mb-2">
-        <h2 class="text-2xl font-semibold text-text">{vm.name}</h2>
-        <Badge status={vm.status} />
+        <h2 class="text-2xl font-semibold text-text">{machine.name}</h2>
+        <Badge status={machine.status} />
       </div>
       <div class="flex items-center gap-4 text-sm">
-        {#if vm.ip_address}
-          <span class="font-mono text-accent">{vm.ip_address}</span>
+        {#if machine.ip_address}
+          <span class="font-mono text-accent">{machine.ip_address}</span>
         {/if}
-        <span class="text-muted">{vm.network_name}</span>
-        <span class="text-muted">{timeAgo(vm.created_at)}</span>
+        <span class="text-muted">{machine.network_name}</span>
+        <span class="text-muted">{timeAgo(machine.created_at)}</span>
       </div>
     </div>
     <div class="flex items-center gap-2">
-      {#if vm.status === 'running'}
-        <Button variant="secondary" onclick={toggleVM}>Stop</Button>
+      {#if machine.status === 'running'}
+        <Button variant="secondary" onclick={toggleMachine}>Stop</Button>
       {:else}
-        <Button variant="primary" onclick={toggleVM}>Start</Button>
+        <Button variant="primary" onclick={toggleMachine}>Start</Button>
       {/if}
       <Button variant="danger" onclick={() => { showDeleteModal = true; }}>Delete</Button>
     </div>
@@ -211,7 +211,7 @@
           {activeTab === tab.key
             ? 'border-accent text-text'
             : 'border-transparent text-muted hover:text-text'}
-          {tab.key === 'terminal' && vm.status !== 'running' ? 'opacity-50' : ''}"
+          {tab.key === 'terminal' && machine.status !== 'running' ? 'opacity-50' : ''}"
       >
         {tab.label}
       </button>
@@ -220,12 +220,12 @@
 
   <!-- Tab Content -->
   {#if activeTab === 'terminal'}
-    {#if vm.status === 'running'}
-      <Terminal vmId={vm.id} />
+    {#if machine.status === 'running'}
+      <Terminal machineId={machine.id} />
     {:else}
       <Card>
         <div class="flex items-center justify-center py-12">
-          <p class="text-muted text-sm">VM is not running. Start it to access the terminal.</p>
+          <p class="text-muted text-sm">Machine is not running. Start it to access the terminal.</p>
         </div>
       </Card>
     {/if}
@@ -250,19 +250,19 @@
 
   {:else if activeTab === 'ports'}
     <Card padding={false}>
-      {#if vm.port_rules && vm.port_rules.length > 0}
+      {#if machine.port_rules && machine.port_rules.length > 0}
         <table class="w-full">
           <thead>
             <tr class="border-b border-border">
               <th class="text-left text-xs font-medium text-muted uppercase tracking-wider px-4 py-3">Host Port</th>
-              <th class="text-left text-xs font-medium text-muted uppercase tracking-wider px-4 py-3">VM Port</th>
+              <th class="text-left text-xs font-medium text-muted uppercase tracking-wider px-4 py-3">Machine Port</th>
               <th class="text-left text-xs font-medium text-muted uppercase tracking-wider px-4 py-3">Protocol</th>
               <th class="text-right text-xs font-medium text-muted uppercase tracking-wider px-4 py-3">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {#each vm.port_rules as rule (rule.host_port)}
-              <PortRuleRow {rule} vmId={vm.id} ondelete={handlePortsChanged} />
+            {#each machine.port_rules as rule (rule.host_port)}
+              <PortRuleRow {rule} machineId={machine.id} ondelete={handlePortsChanged} />
             {/each}
           </tbody>
         </table>
@@ -272,12 +272,12 @@
         </div>
       {/if}
     </Card>
-    <ExposePortForm vmId={vm.id} onexposed={handlePortsChanged} />
+    <ExposePortForm machineId={machine.id} onexposed={handlePortsChanged} />
 
   {:else if activeTab === 'volumes'}
     <div class="flex items-center justify-between mb-4">
       <h3 class="text-lg font-semibold text-text">Attached Volumes</h3>
-      {#if vm.status !== 'running' && availableVolumes.length > 0}
+      {#if machine.status !== 'running' && availableVolumes.length > 0}
         <div class="flex gap-2">
           <select
             id="attach-vol-select"
@@ -297,7 +297,7 @@
     </div>
     {#if attachedVolumes.length === 0}
       <Card>
-        <p class="text-sm text-muted text-center py-4">No volumes attached to this VM.</p>
+        <p class="text-sm text-muted text-center py-4">No volumes attached to this machine.</p>
       </Card>
     {:else}
       <Card padding={false}>
@@ -322,10 +322,10 @@
                   <td class="px-4 py-3 text-muted">{vol.role}</td>
                   <td class="px-4 py-3 text-muted">{timeAgo(vol.created)}</td>
                   <td class="px-5 py-3 text-right">
-                    {#if vm.status !== 'running'}
+                    {#if machine.status !== 'running'}
                       <Button variant="secondary" size="sm" loading={detachingId === vol.id} onclick={() => handleDetach(vol)}>Detach</Button>
                     {:else}
-                      <span class="text-xs text-muted">Stop VM to manage</span>
+                      <span class="text-xs text-muted">Stop machine to manage</span>
                     {/if}
                   </td>
                 </tr>
@@ -341,43 +341,43 @@
       <div class="grid grid-cols-2 md:grid-cols-3 gap-6">
         <div>
           <p class="text-sm text-muted">vCPUs</p>
-          <p class="text-text mt-0.5">{vm.vcpus}</p>
+          <p class="text-text mt-0.5">{machine.vcpus}</p>
         </div>
         <div>
           <p class="text-sm text-muted">Memory</p>
-          <p class="text-text mt-0.5">{formatMB(vm.memory_mb)}</p>
+          <p class="text-text mt-0.5">{formatMB(machine.memory_mb)}</p>
         </div>
         <div>
           <p class="text-sm text-muted">Storage</p>
-          <p class="text-text mt-0.5">{formatMB(vm.storage_mb)}</p>
+          <p class="text-text mt-0.5">{formatMB(machine.storage_mb)}</p>
         </div>
         <div>
           <p class="text-sm text-muted">Image</p>
-          <p class="text-text mt-0.5">{imageName(vm.image)}</p>
-          {#if vm.image_digest}
-            <p class="text-muted font-mono text-xs mt-0.5" title="sha256:{vm.image_digest}">sha256:{vm.image_digest.slice(0, 16)}...</p>
+          <p class="text-text mt-0.5">{imageName(machine.image)}</p>
+          {#if machine.image_digest}
+            <p class="text-muted font-mono text-xs mt-0.5" title="sha256:{machine.image_digest}">sha256:{machine.image_digest.slice(0, 16)}...</p>
           {/if}
         </div>
         <div>
           <p class="text-sm text-muted">Namespace</p>
-          <p class="text-text mt-0.5">{vm.namespace || '-'}</p>
+          <p class="text-text mt-0.5">{machine.namespace || '-'}</p>
         </div>
         <div>
           <p class="text-sm text-muted">Network</p>
-          <p class="text-text mt-0.5">{vm.network_name}</p>
+          <p class="text-text mt-0.5">{machine.network_name}</p>
         </div>
         <div>
           <p class="text-sm text-muted">Created</p>
-          <p class="text-text mt-0.5">{formatDate(vm.created_at)}</p>
+          <p class="text-text mt-0.5">{formatDate(machine.created_at)}</p>
         </div>
         <div>
-          <p class="text-sm text-muted">VM ID</p>
-          <p class="text-text mt-0.5 font-mono text-sm">{vm.id}</p>
+          <p class="text-sm text-muted">Machine ID</p>
+          <p class="text-text mt-0.5 font-mono text-sm">{machine.id}</p>
         </div>
-        {#if vm.pid}
+        {#if machine.pid}
           <div>
             <p class="text-sm text-muted">PID</p>
-            <p class="text-text mt-0.5 font-mono text-sm">{vm.pid}</p>
+            <p class="text-text mt-0.5 font-mono text-sm">{machine.pid}</p>
           </div>
         {/if}
       </div>
@@ -388,13 +388,13 @@
 
 <Modal
   open={showDeleteModal}
-  title="Delete VM"
+  title="Delete Machine"
   danger
   confirmText="Delete"
   onclose={() => { showDeleteModal = false; }}
   onconfirm={handleDelete}
 >
-  {#if vm}
-    <p>Are you sure you want to delete <strong class="text-text">{vm.name}</strong>? This action cannot be undone. All data will be lost.</p>
+  {#if machine}
+    <p>Are you sure you want to delete <strong class="text-text">{machine.name}</strong>? This action cannot be undone. All data will be lost.</p>
   {/if}
 </Modal>

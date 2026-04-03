@@ -196,7 +196,7 @@ func runNetworkList(database *sql.DB) {
 
 	// Count VMs on default network
 	var defaultCount int
-	if err := database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id IS NULL AND status NOT IN ('deleted')").Scan(&defaultCount); err != nil {
+	if err := database.QueryRow("SELECT COUNT(*) FROM machine WHERE network_id IS NULL AND status NOT IN ('deleted')").Scan(&defaultCount); err != nil {
 		defaultCount = 0
 	}
 
@@ -210,7 +210,7 @@ func runNetworkList(database *sql.DB) {
 		})
 		for _, n := range nets {
 			var vmCount int
-			if err := database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = (SELECT id FROM network WHERE name = ?) AND status NOT IN ('deleted')", n.name).Scan(&vmCount); err != nil {
+			if err := database.QueryRow("SELECT COUNT(*) FROM machine WHERE network_id = (SELECT id FROM network WHERE name = ?) AND status NOT IN ('deleted')", n.name).Scan(&vmCount); err != nil {
 				vmCount = 0
 			}
 			result = append(result, map[string]interface{}{
@@ -231,7 +231,7 @@ func runNetworkList(database *sql.DB) {
 
 	for _, n := range nets {
 		var vmCount int
-		if err := database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = (SELECT id FROM network WHERE name = ?) AND status NOT IN ('deleted')", n.name).Scan(&vmCount); err != nil {
+		if err := database.QueryRow("SELECT COUNT(*) FROM machine WHERE network_id = (SELECT id FROM network WHERE name = ?) AND status NOT IN ('deleted')", n.name).Scan(&vmCount); err != nil {
 			vmCount = 0
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n", n.name, n.subnet, n.bridge, vmCount)
@@ -255,7 +255,7 @@ func runNetworkDelete(logger *zap.Logger, database *sql.DB, name string) error {
 
 	// Check for running VMs
 	var vmCount int
-	if err := database.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = ? AND status NOT IN ('deleted')", id).Scan(&vmCount); err != nil {
+	if err := database.QueryRow("SELECT COUNT(*) FROM machine WHERE network_id = ? AND status NOT IN ('deleted')", id).Scan(&vmCount); err != nil {
 		return fmt.Errorf("check VMs on network: %w", err)
 	}
 	if vmCount > 0 {

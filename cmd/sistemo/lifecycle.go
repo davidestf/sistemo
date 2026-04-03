@@ -15,11 +15,11 @@ import (
 
 func runDelete(logger *zap.Logger, database *sql.DB, nameOrID string, preserveStorage bool) error {
 	baseURL := daemon.URL()
-	vmID, err := lookupVM(database, nameOrID, "deleted")
+	machineID, err := lookupVM(database, nameOrID, "deleted")
 	if err != nil {
 		return err
 	}
-	deleted, err := daemon.DeleteVM(baseURL, vmID, preserveStorage)
+	deleted, err := daemon.DeleteMachine(baseURL, machineID, preserveStorage)
 	if err != nil {
 		daemonUnreachable := strings.Contains(err.Error(), "connection refused") ||
 			strings.Contains(err.Error(), "connection reset") ||
@@ -28,19 +28,19 @@ func runDelete(logger *zap.Logger, database *sql.DB, nameOrID string, preserveSt
 			strings.Contains(err.Error(), "timeout")
 		if daemonUnreachable {
 			// Daemon is down — update DB directly as fallback
-			fmt.Fprintln(os.Stderr, "Warning: daemon unreachable; marking VM as deleted in database.")
+			fmt.Fprintln(os.Stderr, "Warning: daemon unreachable; marking machine as deleted in database.")
 			now := time.Now().UTC().Format(time.RFC3339)
-			db.SafeExec(database, "UPDATE vm SET status = 'deleted', last_state_change = ? WHERE id = ?", now, vmID)
-			db.SafeExec(database, "DELETE FROM ip_allocation WHERE vm_id = ?", vmID)
-			db.SafeExec(database, "DELETE FROM port_rule WHERE vm_id = ?", vmID)
-			db.SafeExec(database, "UPDATE volume SET status='online', attached=NULL WHERE attached=?", vmID)
+			db.SafeExec(database, "UPDATE machine SET status = 'deleted', last_state_change = ? WHERE id = ?", now, machineID)
+			db.SafeExec(database, "DELETE FROM ip_allocation WHERE machine_id = ?", machineID)
+			db.SafeExec(database, "DELETE FROM port_rule WHERE machine_id = ?", machineID)
+			db.SafeExec(database, "UPDATE volume SET status='online', machine_id=NULL WHERE machine_id=?", machineID)
 		} else {
-			return fmt.Errorf("delete VM: %w", err)
+			return fmt.Errorf("delete machine: %w", err)
 		}
 	} else if !deleted {
-		fmt.Fprintln(os.Stderr, "Warning: VM process not found on daemon (may already be stopped).")
+		fmt.Fprintln(os.Stderr, "Warning: machine process not found on daemon (may already be stopped).")
 	}
-	fmt.Printf("Deleted %s\n", vmID)
+	fmt.Printf("Deleted %s\n", machineID)
 	return nil
 }
 
@@ -49,19 +49,19 @@ func runStop(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	if err := daemon.Health(baseURL); err != nil {
 		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
 	}
-	vmID, err := lookupVM(database, nameOrID, "deleted")
+	machineID, err := lookupVM(database, nameOrID, "deleted")
 	if err != nil {
-		return fmt.Errorf("VM not found: %s", nameOrID)
+		return fmt.Errorf("machine not found: %s", nameOrID)
 	}
-	stopped, err := daemon.StopVM(baseURL, vmID)
+	stopped, err := daemon.StopMachine(baseURL, machineID)
 	if err != nil {
-		return fmt.Errorf("stop VM: %w", err)
+		return fmt.Errorf("stop machine: %w", err)
 	}
 	if !stopped {
-		fmt.Printf("VM %s not found on daemon.\n", vmID)
+		fmt.Printf("Machine %s not found on daemon.\n", machineID)
 		return nil
 	}
-	fmt.Printf("Stopped %s\n", vmID)
+	fmt.Printf("Stopped %s\n", machineID)
 	return nil
 }
 
@@ -70,17 +70,17 @@ func runStart(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	if err := daemon.Health(baseURL); err != nil {
 		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
 	}
-	vmID, err := lookupVM(database, nameOrID, "deleted")
+	machineID, err := lookupVM(database, nameOrID, "deleted")
 	if err != nil {
 		return err
 	}
-	resp, err := daemon.StartVM(baseURL, vmID)
+	resp, err := daemon.StartMachine(baseURL, machineID)
 	if err != nil {
-		return fmt.Errorf("start VM: %w", err)
+		return fmt.Errorf("start machine: %w", err)
 	}
-	fmt.Printf("Started %s\n", vmID)
+	fmt.Printf("Started %s\n", machineID)
 	fmt.Printf("  IP: %s  Namespace: %s  Boot: %dms\n", resp.IPAddress, resp.Namespace, resp.BootTimeMS)
-	fmt.Printf("  Dashboard: %s/dashboard/#/vms/%s\n", baseURL, vmID)
+	fmt.Printf("  Dashboard: %s/dashboard/#/machines/%s\n", baseURL, machineID)
 	return nil
 }
 
@@ -89,26 +89,26 @@ func runRestart(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	if err := daemon.Health(baseURL); err != nil {
 		return fmt.Errorf("daemon not reachable (run 'sistemo up' first) url=%s: %w", baseURL, err)
 	}
-	vmID, err := lookupVM(database, nameOrID, "deleted")
+	machineID, err := lookupVM(database, nameOrID, "deleted")
 	if err != nil {
 		return err
 	}
 
-	// Stop (ignore "not found" — VM might already be stopped)
-	stopped, err := daemon.StopVM(baseURL, vmID)
+	// Stop (ignore "not found" — machine might already be stopped)
+	stopped, err := daemon.StopMachine(baseURL, machineID)
 	if err != nil {
-		return fmt.Errorf("stop VM: %w", err)
+		return fmt.Errorf("stop machine: %w", err)
 	}
 	if stopped {
-		fmt.Printf("Stopped %s\n", vmID)
+		fmt.Printf("Stopped %s\n", machineID)
 	}
 
 	// Start
-	resp, err := daemon.StartVM(baseURL, vmID)
+	resp, err := daemon.StartMachine(baseURL, machineID)
 	if err != nil {
-		return fmt.Errorf("start VM: %w", err)
+		return fmt.Errorf("start machine: %w", err)
 	}
-	fmt.Printf("Started %s\n", vmID)
+	fmt.Printf("Started %s\n", machineID)
 	fmt.Printf("  IP: %s  Namespace: %s  Boot: %dms\n", resp.IPAddress, resp.Namespace, resp.BootTimeMS)
 	return nil
 }

@@ -131,7 +131,7 @@ func (h *Volume) Create(w http.ResponseWriter, r *http.Request) {
 
 // List handles GET /volumes — lists all volumes.
 func (h *Volume) List(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.db.Query("SELECT id, name, size_mb, path, status, attached, created, last_state_change, role FROM volume")
+	rows, err := h.db.Query("SELECT id, name, size_mb, path, status, machine_id, created, last_state_change, role FROM volume")
 	if err != nil {
 		h.logger.Error("list volumes failed", zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "failed to list volumes")
@@ -145,7 +145,7 @@ func (h *Volume) List(w http.ResponseWriter, r *http.Request) {
 		SizeMB          int     `json:"size_mb"`
 		Path            string  `json:"path"`
 		Status          string  `json:"status"`
-		Attached        *string `json:"attached"`
+		MachineID       *string `json:"machine_id"`
 		Created         string  `json:"created"`
 		LastStateChange string  `json:"last_state_change"`
 		Role            string  `json:"role"`
@@ -154,7 +154,7 @@ func (h *Volume) List(w http.ResponseWriter, r *http.Request) {
 	var volumes []volumeRow
 	for rows.Next() {
 		var v volumeRow
-		if err := rows.Scan(&v.ID, &v.Name, &v.SizeMB, &v.Path, &v.Status, &v.Attached, &v.Created, &v.LastStateChange, &v.Role); err != nil {
+		if err := rows.Scan(&v.ID, &v.Name, &v.SizeMB, &v.Path, &v.Status, &v.MachineID, &v.Created, &v.LastStateChange, &v.Role); err != nil {
 			h.logger.Error("scan volume row failed", zap.Error(err))
 			continue
 		}
@@ -176,11 +176,11 @@ func (h *Volume) Get(w http.ResponseWriter, r *http.Request) {
 
 	var id, name, path, status, created, lastChange, role string
 	var sizeMB int
-	var attached *string
+	var machineID *string
 	err := h.db.QueryRow(
-		"SELECT id, name, size_mb, path, status, attached, created, last_state_change, role FROM volume WHERE id = ? OR name = ?",
+		"SELECT id, name, size_mb, path, status, machine_id, created, last_state_change, role FROM volume WHERE id = ? OR name = ?",
 		idOrName, idOrName,
-	).Scan(&id, &name, &sizeMB, &path, &status, &attached, &created, &lastChange, &role)
+	).Scan(&id, &name, &sizeMB, &path, &status, &machineID, &created, &lastChange, &role)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "volume not found")
 		return
@@ -197,7 +197,7 @@ func (h *Volume) Get(w http.ResponseWriter, r *http.Request) {
 		"size_mb":           sizeMB,
 		"path":              path,
 		"status":            status,
-		"attached":          attached,
+		"machine_id":        machineID,
 		"created":           created,
 		"last_state_change": lastChange,
 		"role":              role,
@@ -213,11 +213,11 @@ func (h *Volume) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var id, name, path, status string
-	var attached *string
+	var machineID *string
 	err := h.db.QueryRow(
-		"SELECT id, name, path, status, attached FROM volume WHERE id = ? OR name = ?",
+		"SELECT id, name, path, status, machine_id FROM volume WHERE id = ? OR name = ?",
 		idOrName, idOrName,
-	).Scan(&id, &name, &path, &status, &attached)
+	).Scan(&id, &name, &path, &status, &machineID)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "volume not found")
 		return
@@ -229,11 +229,11 @@ func (h *Volume) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if status == "attached" {
-		vmID := ""
-		if attached != nil {
-			vmID = *attached
+		machID := ""
+		if machineID != nil {
+			machID = *machineID
 		}
-		writeError(w, http.StatusConflict, fmt.Sprintf("volume is attached to VM %s, detach first", vmID))
+		writeError(w, http.StatusConflict, fmt.Sprintf("volume is attached to machine %s, detach first", machID))
 		return
 	}
 
@@ -284,11 +284,11 @@ func (h *Volume) Resize(w http.ResponseWriter, r *http.Request) {
 	// Look up volume.
 	var volID, volName, volPath, volStatus string
 	var currentSizeMB int
-	var attached *string
+	var machineID *string
 	err := h.db.QueryRow(
-		"SELECT id, name, path, status, size_mb, attached FROM volume WHERE id = ? OR name = ?",
+		"SELECT id, name, path, status, size_mb, machine_id FROM volume WHERE id = ? OR name = ?",
 		idOrName, idOrName,
-	).Scan(&volID, &volName, &volPath, &volStatus, &currentSizeMB, &attached)
+	).Scan(&volID, &volName, &volPath, &volStatus, &currentSizeMB, &machineID)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "volume not found")
 		return
@@ -305,23 +305,27 @@ func (h *Volume) Resize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Must not be attached to a running VM.
-	if attached != nil && *attached != "" {
-		var vmStatus string
-		err := h.db.QueryRow("SELECT status FROM vm WHERE id = ?", *attached).Scan(&vmStatus)
+	// Must not be attached to a running machine.
+	if machineID != nil && *machineID != "" {
+		var machineStatus string
+		err := h.db.QueryRow("SELECT status FROM machine WHERE id = ?", *machineID).Scan(&machineStatus)
 		if err != nil && err != sql.ErrNoRows {
-			h.logger.Error("failed to check VM status for resize", zap.Error(err))
-			writeError(w, http.StatusInternalServerError, "failed to verify VM status")
+			h.logger.Error("failed to check machine status for resize", zap.Error(err))
+			writeError(w, http.StatusInternalServerError, "failed to verify machine status")
 			return
 		}
-		if err == nil && vmStatus == "running" {
-			writeError(w, http.StatusConflict, "stop the VM first — cannot resize while running")
+		if err == nil && machineStatus == "running" {
+			writeError(w, http.StatusConflict, "stop the machine first — cannot resize while running")
 			return
 		}
 	}
 
 	if req.SizeMB <= currentSizeMB {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("new size (%d MB) must be larger than current size (%d MB) — shrinking is not supported", req.SizeMB, currentSizeMB))
+		return
+	}
+	if req.SizeMB > 102400 {
+		writeError(w, http.StatusBadRequest, "volume size cannot exceed 100 GB (102400 MB)")
 		return
 	}
 
@@ -398,11 +402,11 @@ func (h *Volume) Resize(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Attach handles POST /vms/{vmID}/volume/attach — attaches a volume to a stopped VM.
+// Attach handles POST /machines/{machineID}/volume/attach — attaches a volume to a stopped machine.
 func (h *Volume) Attach(w http.ResponseWriter, r *http.Request) {
-	vmIDParam := chi.URLParam(r, "vmID")
-	if !isValidSafeID(vmIDParam) {
-		writeError(w, http.StatusBadRequest, "invalid VM id")
+	machineIDParam := chi.URLParam(r, "machineID")
+	if !isValidSafeID(machineIDParam) {
+		writeError(w, http.StatusBadRequest, "invalid machine id")
 		return
 	}
 
@@ -435,30 +439,30 @@ func (h *Volume) Attach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate VM exists and is not running.
-	var vmID, vmStatus string
+	// Validate machine exists and is not running.
+	var machineID, machineStatus string
 	err = h.db.QueryRow(
-		"SELECT id, status FROM vm WHERE (id = ? OR name = ?) AND status != 'deleted'",
-		vmIDParam, vmIDParam,
-	).Scan(&vmID, &vmStatus)
+		"SELECT id, status FROM machine WHERE (id = ? OR name = ?) AND status != 'deleted'",
+		machineIDParam, machineIDParam,
+	).Scan(&machineID, &machineStatus)
 	if err == sql.ErrNoRows {
-		writeError(w, http.StatusNotFound, "VM not found")
+		writeError(w, http.StatusNotFound, "machine not found")
 		return
 	}
 	if err != nil {
-		h.logger.Error("lookup VM for attach failed", zap.Error(err))
-		writeError(w, http.StatusInternalServerError, "failed to look up VM")
+		h.logger.Error("lookup machine for attach failed", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "failed to look up machine")
 		return
 	}
-	if vmStatus == "running" {
-		writeError(w, http.StatusConflict, "stop the VM first")
+	if machineStatus == "running" {
+		writeError(w, http.StatusConflict, "stop the machine first")
 		return
 	}
 
 	// Fix 2: Atomic attach — single UPDATE with WHERE clause prevents TOCTOU race
 	result, err := h.db.Exec(
-		"UPDATE volume SET status='attached', attached=?, last_state_change=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status='online'",
-		vmID, volID,
+		"UPDATE volume SET status='attached', machine_id=?, last_state_change=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status='online'",
+		machineID, volID,
 	)
 	if err != nil {
 		h.logger.Error("attach volume update failed", zap.Error(err))
@@ -471,20 +475,20 @@ func (h *Volume) Attach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db.LogAction(h.db, "attach", "volume", volID, volName, fmt.Sprintf("vm=%s", vmID), true)
+	db.LogAction(h.db, "attach", "volume", volID, volName, fmt.Sprintf("machine=%s", machineID), true)
 	writeJSON(w, http.StatusOK, map[string]string{
-		"id":     volID,
-		"name":   volName,
-		"status": "attached",
-		"vm_id":  vmID,
+		"id":         volID,
+		"name":       volName,
+		"status":     "attached",
+		"machine_id": machineID,
 	})
 }
 
-// Detach handles POST /vms/{vmID}/volume/detach — detaches a volume from a stopped VM.
+// Detach handles POST /machines/{machineID}/volume/detach — detaches a volume from a stopped machine.
 func (h *Volume) Detach(w http.ResponseWriter, r *http.Request) {
-	vmIDParam := chi.URLParam(r, "vmID")
-	if !isValidSafeID(vmIDParam) {
-		writeError(w, http.StatusBadRequest, "invalid VM id")
+	machineIDParam := chi.URLParam(r, "machineID")
+	if !isValidSafeID(machineIDParam) {
+		writeError(w, http.StatusBadRequest, "invalid machine id")
 		return
 	}
 
@@ -503,11 +507,11 @@ func (h *Volume) Detach(w http.ResponseWriter, r *http.Request) {
 
 	// Look up volume.
 	var volID, volName, volStatus string
-	var attached *string
+	var machineID *string
 	err := h.db.QueryRow(
-		"SELECT id, name, status, attached FROM volume WHERE id = ? OR name = ?",
+		"SELECT id, name, status, machine_id FROM volume WHERE id = ? OR name = ?",
 		req.Volume, req.Volume,
-	).Scan(&volID, &volName, &volStatus, &attached)
+	).Scan(&volID, &volName, &volStatus, &machineID)
 	if err == sql.ErrNoRows {
 		writeError(w, http.StatusNotFound, "volume not found")
 		return
@@ -522,37 +526,37 @@ func (h *Volume) Detach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the volume is attached to the VM in the URL
-	if attached == nil || *attached == "" {
-		writeError(w, http.StatusConflict, "volume is not attached to any VM")
+	// Verify the volume is attached to the machine in the URL
+	if machineID == nil || *machineID == "" {
+		writeError(w, http.StatusConflict, "volume is not attached to any machine")
 		return
 	}
-	// Resolve vmIDParam — could be name or ID
-	var resolvedVMID string
-	err = h.db.QueryRow("SELECT id FROM vm WHERE (id = ? OR name = ?) AND status != 'deleted'", vmIDParam, vmIDParam).Scan(&resolvedVMID)
+	// Resolve machineIDParam — could be name or ID
+	var resolvedMachineID string
+	err = h.db.QueryRow("SELECT id FROM machine WHERE (id = ? OR name = ?) AND status != 'deleted'", machineIDParam, machineIDParam).Scan(&resolvedMachineID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "VM not found")
+		writeError(w, http.StatusNotFound, "machine not found")
 		return
 	}
-	if *attached != resolvedVMID {
-		writeError(w, http.StatusConflict, fmt.Sprintf("volume is not attached to this VM (attached to %s)", *attached))
+	if *machineID != resolvedMachineID {
+		writeError(w, http.StatusConflict, fmt.Sprintf("volume is not attached to this machine (attached to %s)", *machineID))
 		return
 	}
 
-	// Check attached VM status.
-	if attached != nil && *attached != "" {
-		var vmStatus string
-		err = h.db.QueryRow("SELECT status FROM vm WHERE id = ? AND status != 'deleted'", *attached).Scan(&vmStatus)
-		if err == nil && vmStatus == "running" {
-			writeError(w, http.StatusConflict, "stop the VM first")
+	// Check attached machine status.
+	if machineID != nil && *machineID != "" {
+		var machineStatus string
+		err = h.db.QueryRow("SELECT status FROM machine WHERE id = ? AND status != 'deleted'", *machineID).Scan(&machineStatus)
+		if err == nil && machineStatus == "running" {
+			writeError(w, http.StatusConflict, "stop the machine first")
 			return
 		}
-		// If VM not found or deleted, allow detach to proceed.
+		// If machine not found or deleted, allow detach to proceed.
 	}
 
 	// Fix 2: Atomic detach — single UPDATE with WHERE clause prevents TOCTOU race
 	detachResult, err := h.db.Exec(
-		"UPDATE volume SET status='online', attached=NULL, last_state_change=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status='attached'",
+		"UPDATE volume SET status='online', machine_id=NULL, last_state_change=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? AND status='attached'",
 		volID,
 	)
 	if err != nil {

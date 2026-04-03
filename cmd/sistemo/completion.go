@@ -51,7 +51,7 @@ func vmNameCompletionFunc(cmd *cobra.Command, args []string, toComplete string) 
 	}
 	defer db.Close()
 
-	rows, err := db.Query("SELECT name FROM vm WHERE status NOT IN ('deleted') AND name IS NOT NULL")
+	rows, err := db.Query("SELECT name FROM machine WHERE status NOT IN ('deleted') AND name IS NOT NULL")
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}

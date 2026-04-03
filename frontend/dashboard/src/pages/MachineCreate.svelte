@@ -307,11 +307,11 @@
         body.attached_storage = selectedVolumes;
       }
 
-      const result = await post<{ vm_id: string }>('/api/v1/vms', body);
-      addToast('VM deployed successfully', 'success');
-      window.location.hash = '#/vms';
+      const result = await post<{ machine_id: string }>('/api/v1/machines', body);
+      addToast('Machine deployed successfully', 'success');
+      window.location.hash = '#/machines';
     } catch (err) {
-      addToast(err instanceof Error ? err.message : 'Failed to deploy VM', 'error');
+      addToast(err instanceof Error ? err.message : 'Failed to deploy machine', 'error');
     } finally {
       deploying = false;
     }
@@ -340,7 +340,7 @@
   </div>
 {:else}
   <div class="max-w-4xl mx-auto space-y-6">
-    <h2 class="text-xl font-semibold text-text">Deploy Virtual Machine</h2>
+    <h2 class="text-xl font-semibold text-text">Deploy Machine</h2>
 
     <!-- Tab Navigation -->
     <div class="flex border-b border-border">
@@ -504,7 +504,7 @@
             </svg>
           </div>
           <h3 class="text-sm font-medium text-text mb-2">Coming Soon</h3>
-          <p class="text-sm text-muted mb-1">Build VM images from Dockerfiles</p>
+          <p class="text-sm text-muted mb-1">Build machine images from Dockerfiles</p>
           <p class="text-xs text-muted">For now: <code class="bg-surface-inner px-1.5 py-0.5 rounded text-accent">docker build -t myapp .</code> then use the Docker Image tab</p>
         </div>
       </Card>
@@ -542,9 +542,9 @@
         <form onsubmit={handleDeploy} class="space-y-5">
           <!-- Name -->
           <div>
-            <label for="vm-name" class="block text-xs text-muted mb-1">Name</label>
+            <label for="machine-name" class="block text-xs text-muted mb-1">Name</label>
             <input
-              id="vm-name"
+              id="machine-name"
               type="text"
               bind:value={name}
               placeholder="auto-generated"
@@ -681,7 +681,7 @@
     <div class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center">
       <div class="bg-surface rounded-xl border border-border p-8 flex flex-col items-center gap-4 max-w-sm">
         <Spinner size="md" />
-        <p class="text-text font-medium">Deploying Virtual Machine...</p>
+        <p class="text-text font-medium">Deploying Machine...</p>
         <p class="text-xs text-muted">This usually takes 3-7 seconds</p>
       </div>
     </div>

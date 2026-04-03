@@ -1,7 +1,7 @@
 <script lang="ts">
   import { getToken } from '$lib/stores/auth.svelte';
 
-  let { vmId }: { vmId: string } = $props();
+  let { machineId }: { machineId: string } = $props();
 
   let containerEl: HTMLDivElement | undefined = $state();
   let error: string | undefined = $state();
@@ -50,7 +50,7 @@
         const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const token = getToken();
         const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
-        ws = new WebSocket(`${protocol}//${location.host}/terminals/vm/${vmId}${tokenParam}`);
+        ws = new WebSocket(`${protocol}//${location.host}/terminals/machine/${machineId}${tokenParam}`);
         ws.binaryType = 'arraybuffer';
 
         ws.onopen = () => {

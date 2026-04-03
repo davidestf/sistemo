@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -58,9 +59,10 @@ func New(dataDir string) (*sql.DB, error) {
 	}
 
 	// Schema evolution: add columns that can't use IF NOT EXISTS in SQLite ALTER TABLE.
-	addColumnIfMissing(db, "vm", "network_id", "TEXT")
-	addColumnIfMissing(db, "vm", "root_volume", "TEXT")
-	addColumnIfMissing(db, "vm", "image_digest", "TEXT")
+	// After migration 012, the table is named "machine" (was "vm").
+	addColumnIfMissing(db, "machine", "network_id", "TEXT")
+	addColumnIfMissing(db, "machine", "root_volume", "TEXT")
+	addColumnIfMissing(db, "machine", "image_digest", "TEXT")
 	addColumnIfMissing(db, "image_build", "image_digest", "TEXT")
 
 	// Restore network_id data after migration + column re-add.
@@ -75,13 +77,18 @@ func New(dataDir string) (*sql.DB, error) {
 	return db, nil
 }
 
-// saveNetworkIDs reads vm.network_id before a table rebuild migration.
+// saveNetworkIDs reads machine.network_id before a table rebuild migration.
 // Returns empty map if the column or table doesn't exist.
+// Tries "machine" first (post-012), falls back to "vm" (pre-012).
 func saveNetworkIDs(db *sql.DB) map[string]string {
 	m := map[string]string{}
-	rows, err := db.Query("SELECT id, network_id FROM vm WHERE network_id IS NOT NULL AND network_id != ''")
+	// Try the new table name first, fall back to old.
+	rows, err := db.Query("SELECT id, network_id FROM machine WHERE network_id IS NOT NULL AND network_id != ''")
 	if err != nil {
-		return m
+		rows, err = db.Query("SELECT id, network_id FROM vm WHERE network_id IS NOT NULL AND network_id != ''")
+		if err != nil {
+			return m
+		}
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -96,8 +103,8 @@ func saveNetworkIDs(db *sql.DB) map[string]string {
 // restoreNetworkIDs writes saved network_id values back after a table rebuild.
 func restoreNetworkIDs(db *sql.DB, m map[string]string) {
 	for id, netID := range m {
-		if _, err := db.Exec("UPDATE vm SET network_id = ? WHERE id = ?", netID, id); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to restore network_id for VM %s: %v\n", id, err)
+		if _, err := db.Exec("UPDATE machine SET network_id = ? WHERE id = ?", netID, id); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to restore network_id for machine %s: %v\n", id, err)
 		}
 	}
 }
@@ -273,8 +280,8 @@ func migrateExistingImages(db *sql.DB, dataDir string) {
 		count++
 	}
 
-	// Backfill vm.image_digest for existing VMs.
-	vmRows, err := db.Query("SELECT id, image FROM vm WHERE image_digest IS NULL AND status != 'deleted'")
+	// Backfill machine.image_digest for existing machines.
+	vmRows, err := db.Query("SELECT id, image FROM machine WHERE image_digest IS NULL AND status != 'deleted'")
 	if err == nil {
 		type vmRef struct{ id, image string }
 		var refs []vmRef
@@ -301,7 +308,7 @@ func migrateExistingImages(db *sql.DB, dataDir string) {
 				db.QueryRow("SELECT digest FROM image WHERE name = ? LIMIT 1", name).Scan(&digest)
 			}
 			if digest != "" {
-				db.Exec("UPDATE vm SET image_digest = ? WHERE id = ?", digest, r.id)
+				db.Exec("UPDATE machine SET image_digest = ? WHERE id = ?", digest, r.id)
 			}
 		}
 	}
@@ -370,21 +377,55 @@ func runMigrations(db *sql.DB) error {
 		if err != nil {
 			return err
 		}
+		// Table-rebuild migrations (DROP + CREATE) require FK checks off.
+		// PRAGMA foreign_keys cannot be changed inside a transaction, so we
+		// disable before and re-enable + verify after.
+		needsFKOff := strings.Contains(string(body), "DROP TABLE")
+		if needsFKOff {
+			db.Exec("PRAGMA foreign_keys = OFF")
+		}
+
 		// Run migration + tracking insert in a transaction to prevent half-applied state
 		tx, err := db.Begin()
 		if err != nil {
+			if needsFKOff {
+				db.Exec("PRAGMA foreign_keys = ON")
+			}
 			return fmt.Errorf("begin migration %s: %w", name, err)
 		}
 		if _, err := tx.Exec(string(body)); err != nil {
 			tx.Rollback()
+			if needsFKOff {
+				db.Exec("PRAGMA foreign_keys = ON")
+			}
 			return fmt.Errorf("migration %s: %w", name, err)
 		}
 		if _, err := tx.Exec("INSERT INTO schema_migration (name) VALUES (?)", name); err != nil {
 			tx.Rollback()
+			if needsFKOff {
+				db.Exec("PRAGMA foreign_keys = ON")
+			}
 			return fmt.Errorf("record migration %s: %w", name, err)
 		}
 		if err := tx.Commit(); err != nil {
+			if needsFKOff {
+				db.Exec("PRAGMA foreign_keys = ON")
+			}
 			return fmt.Errorf("commit migration %s: %w", name, err)
+		}
+		if needsFKOff {
+			db.Exec("PRAGMA foreign_keys = ON")
+			// Verify FK integrity after table rebuild — check all violations
+			fkRows, fkErr := db.Query("PRAGMA foreign_key_check")
+			if fkErr == nil {
+				for fkRows.Next() {
+					var table, rowid, parent, fkid string
+					if fkRows.Scan(&table, &rowid, &parent, &fkid) == nil {
+						fmt.Fprintf(os.Stderr, "warning: FK violation after migration %s: table=%s row=%s parent=%s\n", name, table, rowid, parent)
+					}
+				}
+				fkRows.Close()
+			}
 		}
 	}
 	return nil

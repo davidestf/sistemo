@@ -27,13 +27,13 @@ func (h *Dashboard) Dashboard(w http.ResponseWriter, r *http.Request) {
 	if h.db != nil {
 		rows, err = h.db.Query(`
 			SELECT id, name, status, image, ip_address
-			FROM vm
+			FROM machine
 			WHERE status != 'deleted'
 			ORDER BY last_state_change DESC
 		`)
 		if err != nil {
 			h.logger.Error("dashboard query failed", zap.Error(err))
-			fmt.Fprint(w, dashboardHTML("Error", "<p>Failed to load VMs.</p>"))
+			fmt.Fprint(w, dashboardHTML("Error", "<p>Failed to load machines.</p>"))
 			return
 		}
 		defer rows.Close()
@@ -59,8 +59,8 @@ func (h *Dashboard) Dashboard(w http.ResponseWriter, r *http.Request) {
   </style>
 </head>
 <body>
-  <h1>Sistemo VMs</h1>
-  <p><a href="/health">Health</a> | <a href="/vms">API: List VMs (JSON)</a></p>
+  <h1>Sistemo Machines</h1>
+  <p><a href="/health">Health</a> | <a href="/machines">API: List Machines (JSON)</a></p>
   <table>
     <thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Image</th><th>IP</th><th>Terminal</th></tr></thead>
     <tbody>
@@ -92,7 +92,7 @@ func (h *Dashboard) Dashboard(w http.ResponseWriter, r *http.Request) {
 			if ipStr == "" {
 				ipStr = "-"
 			}
-			termLink := fmt.Sprintf("/terminals/vm/%s", idStr)
+			termLink := fmt.Sprintf("/terminals/machine/%s", idStr)
 			fmt.Fprintf(&sb,
 				"    <tr><td>%s</td><td>%s</td><td class=\"status %s\">%s</td><td>%s</td><td>%s</td><td><a href=\"%s\">Open</a></td></tr>\n",
 				escapeHTML(idStr), escapeHTML(nameStr), strings.ToLower(statusStr), escapeHTML(statusStr), escapeHTML(imageStr), escapeHTML(ipStr), termLink,

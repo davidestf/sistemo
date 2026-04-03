@@ -12,9 +12,9 @@ import (
 // SQLite's locking can handle this, but a Go-level mutex is simpler and faster.
 var ipAllocMu sync.Mutex
 
-// AllocateIP finds the lowest available IP in the bridge subnet and assigns it to vmID.
-// Serialized with a mutex to prevent race conditions under concurrent VM creation.
-func AllocateIP(db *sql.DB, vmID string) (string, error) {
+// AllocateIP finds the lowest available IP in the bridge subnet and assigns it to machineID.
+// Serialized with a mutex to prevent race conditions under concurrent machine creation.
+func AllocateIP(db *sql.DB, machineID string) (string, error) {
 	if db == nil {
 		return "", fmt.Errorf("database required for IP allocation")
 	}
@@ -63,8 +63,8 @@ func AllocateIP(db *sql.DB, vmID string) (string, error) {
 		if !allocated[ipStr] {
 			now := time.Now().UTC().Format(time.RFC3339)
 			_, err := tx.Exec(
-				"INSERT INTO ip_allocation (ip, vm_id, allocated_at) VALUES (?, ?, ?)",
-				ipStr, vmID, now,
+				"INSERT INTO ip_allocation (ip, machine_id, allocated_at) VALUES (?, ?, ?)",
+				ipStr, machineID, now,
 			)
 			if err != nil {
 				continue // UNIQUE constraint violation, try next
@@ -78,14 +78,14 @@ func AllocateIP(db *sql.DB, vmID string) (string, error) {
 	return "", fmt.Errorf("no free IPs in %s", BridgeCIDR)
 }
 
-// ReleaseIP frees the IP allocated to vmID. Returns nil if no IP was allocated.
-func ReleaseIP(db *sql.DB, vmID string) error {
+// ReleaseIP frees the IP allocated to machineID. Returns nil if no IP was allocated.
+func ReleaseIP(db *sql.DB, machineID string) error {
 	if db == nil {
 		return nil
 	}
-	result, err := db.Exec("DELETE FROM ip_allocation WHERE vm_id = ?", vmID)
+	result, err := db.Exec("DELETE FROM ip_allocation WHERE machine_id = ?", machineID)
 	if err != nil {
-		return fmt.Errorf("release IP for %s: %w", vmID, err)
+		return fmt.Errorf("release IP for %s: %w", machineID, err)
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
 		return nil // no IP was allocated, not an error
@@ -95,7 +95,7 @@ func ReleaseIP(db *sql.DB, vmID string) error {
 
 // AllocateIPInSubnet allocates an IP from a specific subnet (for named networks).
 // The subnet must be a valid CIDR like "10.201.0.0/24".
-func AllocateIPInSubnet(db *sql.DB, vmID, cidr string) (string, error) {
+func AllocateIPInSubnet(db *sql.DB, machineID, cidr string) (string, error) {
 	if db == nil {
 		return "", fmt.Errorf("database required for IP allocation")
 	}
@@ -153,8 +153,8 @@ func AllocateIPInSubnet(db *sql.DB, vmID, cidr string) (string, error) {
 
 		now := time.Now().UTC().Format(time.RFC3339)
 		_, err := tx.Exec(
-			"INSERT INTO ip_allocation (ip, vm_id, allocated_at) VALUES (?, ?, ?)",
-			ipStr, vmID, now,
+			"INSERT INTO ip_allocation (ip, machine_id, allocated_at) VALUES (?, ?, ?)",
+			ipStr, machineID, now,
 		)
 		if err != nil {
 			continue // UNIQUE constraint violation, try next
@@ -167,13 +167,13 @@ func AllocateIPInSubnet(db *sql.DB, vmID, cidr string) (string, error) {
 	return "", fmt.Errorf("no free IPs in %s", cidr)
 }
 
-// GetAllocatedIP returns the IP currently allocated to vmID, or empty string if none.
-func GetAllocatedIP(db *sql.DB, vmID string) string {
+// GetAllocatedIP returns the IP currently allocated to machineID, or empty string if none.
+func GetAllocatedIP(db *sql.DB, machineID string) string {
 	if db == nil {
 		return ""
 	}
 	var ip string
-	err := db.QueryRow("SELECT ip FROM ip_allocation WHERE vm_id = ?", vmID).Scan(&ip)
+	err := db.QueryRow("SELECT ip FROM ip_allocation WHERE machine_id = ?", machineID).Scan(&ip)
 	if err != nil {
 		return ""
 	}

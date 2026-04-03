@@ -1,10 +1,10 @@
 export interface PortRule {
   host_port: number;
-  vm_port: number;
+  machine_port: number;
   protocol: string;
 }
 
-export interface VM {
+export interface Machine {
   id: string;
   name: string;
   status: string;
@@ -51,7 +51,7 @@ export interface VolumeInfo {
   size_mb: number;
   path: string;
   status: 'online' | 'attached' | 'maintenance' | 'error';
-  attached: string | null;
+  machine_id: string | null;
   role: 'data' | 'root';
   created: string;
   last_state_change: string;
@@ -79,7 +79,7 @@ export interface NetworkInfo {
   name: string;
   subnet: string;
   bridge_name: string;
-  vm_count: number;
+  machine_count: number;
   created_at?: string;
 }
 

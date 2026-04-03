@@ -7,17 +7,17 @@ import (
 
 	"github.com/davidestf/sistemo/internal/agent/config"
 	"github.com/davidestf/sistemo/internal/agent/network"
-	"github.com/davidestf/sistemo/internal/agent/vm"
+	"github.com/davidestf/sistemo/internal/agent/machine"
 	"go.uber.org/zap"
 )
 
 type Health struct {
-	mgr    *vm.Manager
+	mgr    *machine.Manager
 	cfg    *config.Config
 	logger *zap.Logger
 }
 
-func NewHealth(mgr *vm.Manager, cfg *config.Config, logger *zap.Logger) *Health {
+func NewHealth(mgr *machine.Manager, cfg *config.Config, logger *zap.Logger) *Health {
 	return &Health{mgr: mgr, cfg: cfg, logger: logger}
 }
 
@@ -31,7 +31,7 @@ func (h *Health) Health(w http.ResponseWriter, r *http.Request) {
 		kernelOK = false
 	}
 
-	runningVMs := len(h.mgr.ListVMs())
+	runningMachines := len(h.mgr.ListMachines())
 
 	status := "healthy"
 	if !firecrackerOK || !kernelOK {
@@ -41,7 +41,7 @@ func (h *Health) Health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status": status,
 		"checks": map[string]bool{"firecracker": firecrackerOK, "kernel": kernelOK},
-		"stats":  map[string]int{"running_vms": runningVMs},
+		"stats":  map[string]int{"running_machines": runningMachines},
 	})
 }
 

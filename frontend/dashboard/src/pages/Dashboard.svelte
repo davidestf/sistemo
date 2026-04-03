@@ -1,11 +1,11 @@
 <script lang="ts">
-  import type { VM, SystemInfo, ImageInfo, VolumeInfo } from '$lib/api/types';
+  import type { Machine, SystemInfo, ImageInfo, VolumeInfo } from '$lib/api/types';
   import { get } from '$lib/api/client';
   import { formatMB } from '$lib/utils/format';
   import Card from '$lib/components/ui/Card.svelte';
   import Spinner from '$lib/components/ui/Spinner.svelte';
 
-  let vms = $state<VM[]>([]);
+  let machines = $state<Machine[]>([]);
   let system = $state<SystemInfo | null>(null);
   let imageCount = $state(0);
   let volumeCount = $state(0);
@@ -18,14 +18,14 @@
   async function fetchAll() {
     try {
       error = undefined;
-      const [vmData, sysData, imgData, volData, netData] = await Promise.all([
-        get<{ vms: VM[] }>('/api/v1/vms'),
+      const [machineData, sysData, imgData, volData, netData] = await Promise.all([
+        get<{ machines: Machine[] }>('/api/v1/machines'),
         get<SystemInfo>('/api/v1/system'),
         get<{ images: ImageInfo[] }>('/api/v1/images'),
         get<{ volumes: VolumeInfo[] }>('/api/v1/volumes').catch(() => ({ volumes: [] })),
         get<{ networks: any[] }>('/api/v1/networks'),
       ]);
-      vms = vmData.vms ?? [];
+      machines = machineData.machines ?? [];
       system = sysData;
       const images = imgData.images ?? [];
       imageCount = images.length;
@@ -47,8 +47,8 @@
     return () => clearInterval(interval);
   });
 
-  let runningVMs = $derived(vms.filter(v => v.status === 'running').length);
-  let stoppedVMs = $derived(vms.filter(v => v.status === 'stopped').length);
+  let runningMachines = $derived(machines.filter(v => v.status === 'running').length);
+  let stoppedMachines = $derived(machines.filter(v => v.status === 'stopped').length);
 </script>
 
 {#if loading}
@@ -64,21 +64,21 @@
   <!-- Resource Tiles (clickable) -->
   <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div onclick={() => { window.location.hash = '#/vms'; }} class="cursor-pointer group">
+    <div onclick={() => { window.location.hash = '#/machines'; }} class="cursor-pointer group">
       <Card>
         <div class="flex items-center justify-between">
-          <p class="text-sm text-muted group-hover:text-text transition">Virtual Machines</p>
+          <p class="text-sm text-muted group-hover:text-text transition">Machines</p>
           <svg class="w-5 h-5 text-muted group-hover:text-accent transition" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5">
             <rect x="3" y="3" width="14" height="5" rx="1" />
             <rect x="3" y="12" width="14" height="5" rx="1" />
           </svg>
         </div>
-        <p class="text-3xl font-bold text-text mt-2">{vms.length}</p>
+        <p class="text-3xl font-bold text-text mt-2">{machines.length}</p>
         <p class="text-xs text-muted mt-1">
-          {#if runningVMs > 0}<span class="text-success">{runningVMs} running</span>{/if}
-          {#if runningVMs > 0 && stoppedVMs > 0} · {/if}
-          {#if stoppedVMs > 0}<span class="text-warning">{stoppedVMs} stopped</span>{/if}
-          {#if runningVMs === 0 && stoppedVMs === 0}No VMs yet{/if}
+          {#if runningMachines > 0}<span class="text-success">{runningMachines} running</span>{/if}
+          {#if runningMachines > 0 && stoppedMachines > 0} · {/if}
+          {#if stoppedMachines > 0}<span class="text-warning">{stoppedMachines} stopped</span>{/if}
+          {#if runningMachines === 0 && stoppedMachines === 0}No machines yet{/if}
         </p>
       </Card>
     </div>

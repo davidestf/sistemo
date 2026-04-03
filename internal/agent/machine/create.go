@@ -1,4 +1,4 @@
-package vm
+package machine
 
 import (
 	"bytes"
@@ -29,17 +29,17 @@ import (
 	"go.uber.org/zap"
 )
 
-// reqLog returns a logger tagged with request_id (if in context) and vm_id.
-func reqLog(ctx context.Context, fallback *zap.Logger, vmID string) *zap.Logger {
+// reqLog returns a logger tagged with request_id (if in context) and machine_id.
+func reqLog(ctx context.Context, fallback *zap.Logger, machineID string) *zap.Logger {
 	l := agentmw.LoggerFromCtx(ctx, fallback)
-	return l.With(zap.String("vm_id", vmID))
+	return l.With(zap.String("machine_id", machineID))
 }
 
-func createVM(ctx context.Context, m *Manager, req *CreateRequest) (*CreateResponse, error) {
+func createMachine(ctx context.Context, m *Manager, req *CreateRequest) (*CreateResponse, error) {
 	startTime := time.Now()
 
-	if req.VMID == "" || len(req.VMID) > 64 || strings.ContainsAny(req.VMID, " /\\\n\t\r") {
-		return nil, fmt.Errorf("invalid vm id")
+	if req.MachineID == "" || len(req.MachineID) > 64 || strings.ContainsAny(req.MachineID, " /\\\n\t\r") {
+		return nil, fmt.Errorf("invalid machine id")
 	}
 	maxVCPUs := m.cfg.MaxVCPUs
 	if maxVCPUs <= 0 {
@@ -67,29 +67,29 @@ func createVM(ctx context.Context, m *Manager, req *CreateRequest) (*CreateRespo
 }
 
 func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime time.Time) (*CreateResponse, error) {
-	log := reqLog(ctx, m.logger, req.VMID)
+	log := reqLog(ctx, m.logger, req.MachineID)
 	log.Info("create_request", zap.Int("vcpus", req.VCPUs), zap.Int("memory_mb", req.MemoryMB), zap.Int("storage_mb", req.StorageMB))
 
 	// Allocate a unique IP from the appropriate subnet
-	var vmIP string
+	var machineIP string
 	var allocErr error
 	if req.NetworkSubnet != "" {
-		vmIP, allocErr = network.AllocateIPInSubnet(m.db, req.VMID, req.NetworkSubnet)
+		machineIP, allocErr = network.AllocateIPInSubnet(m.db, req.MachineID, req.NetworkSubnet)
 	} else {
-		vmIP, allocErr = network.AllocateIP(m.db, req.VMID)
+		machineIP, allocErr = network.AllocateIP(m.db, req.MachineID)
 	}
 	if allocErr != nil {
 		return nil, fmt.Errorf("allocate IP: %v", allocErr)
 	}
 
 	t := time.Now()
-	net := network.NewVMNetwork(req.VMID, vmIP, m.logger, req.NetworkBridge)
+	net := network.NewVMNetwork(req.MachineID, machineIP, m.logger, req.NetworkBridge)
 	net.BlockSMTP = m.cfg.BlockSMTP
 	if err := net.Create(); err != nil {
-		network.ReleaseIP(m.db, req.VMID)
+		network.ReleaseIP(m.db, req.MachineID)
 		return nil, fmt.Errorf("failed to create network namespace: %v", err)
 	}
-	log.Info("phase: network_setup", zap.Duration("elapsed", time.Since(t)), zap.String("vm_ip", vmIP))
+	log.Info("phase: network_setup", zap.Duration("elapsed", time.Since(t)), zap.String("machine_ip", machineIP))
 
 	var sha *string
 	kernelPath := m.cfg.KernelImagePath
@@ -98,7 +98,7 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	// cleanup releases network and IP on error
 	cleanup := func() {
 		net.Cleanup(m.cfg.HostInterface)
-		network.ReleaseIP(m.db, req.VMID)
+		network.ReleaseIP(m.db, req.MachineID)
 	}
 
 	// Pre-flight disk space check
@@ -107,22 +107,22 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 		return nil, err
 	}
 
-	vmDir := filepath.Join(m.cfg.VMBaseDir, req.VMID)
-	if err := os.MkdirAll(vmDir, 0755); err != nil {
+	machineDir := filepath.Join(m.cfg.VMBaseDir, req.MachineID)
+	if err := os.MkdirAll(machineDir, 0755); err != nil {
 		cleanup()
-		return nil, fmt.Errorf("failed to create VM directory: %v", err)
+		return nil, fmt.Errorf("failed to create machine directory: %v", err)
 	}
 
-	// Determine rootfs destination: use root volume path if provided, else vmDir/rootfs.ext4
-	vmRootfs := filepath.Join(vmDir, "rootfs.ext4")
+	// Determine rootfs destination: use root volume path if provided, else machineDir/rootfs.ext4
+	machineRootfs := filepath.Join(machineDir, "rootfs.ext4")
 	if req.RootVolumePath != "" {
-		vmRootfs = req.RootVolumePath
+		machineRootfs = req.RootVolumePath
 	}
 
 	if req.UseExistingVolume {
 		// Booting from existing volume — skip image copy and resize.
 		// The volume already has data from a previous deployment.
-		log.Info("phase: using_existing_volume", zap.String("path", vmRootfs))
+		log.Info("phase: using_existing_volume", zap.String("path", machineRootfs))
 	} else {
 		// Fresh deployment — resolve image, copy, resize
 		rootfs := req.Image
@@ -132,7 +132,7 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 			dest := cachePathForURL(m.cfg.ImageCacheDir, rootfs)
 			p, s, err := downloadFromURL(rootfs, dest)
 			if err != nil {
-				os.RemoveAll(vmDir)
+				os.RemoveAll(machineDir)
 				cleanup()
 				return nil, err
 			}
@@ -143,15 +143,15 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 		// Otherwise require an existing local path
 		if !filepath.IsAbs(rootfs) && !hasHTTPPrefix(rootfs) {
 			if _, err := os.Stat(rootfs); err != nil {
-				os.RemoveAll(vmDir)
+				os.RemoveAll(machineDir)
 				cleanup()
 				return nil, fmt.Errorf("image %q is not available: pass an HTTP(S) URL to a rootfs.ext4 or an absolute path to a rootfs.ext4 file", req.Image)
 			}
 		}
 
 		t = time.Now()
-		if err := copyFile(rootfs, vmRootfs); err != nil {
-			os.RemoveAll(vmDir)
+		if err := copyFile(rootfs, machineRootfs); err != nil {
+			os.RemoveAll(machineDir)
 			cleanup()
 			return nil, fmt.Errorf("failed to copy rootfs: %v", err)
 		}
@@ -159,8 +159,8 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 
 		if req.StorageMB > 0 {
 			t = time.Now()
-			if err := resizeRootfsTo(vmRootfs, req.StorageMB, log); err != nil {
-				os.RemoveAll(vmDir)
+			if err := resizeRootfsTo(machineRootfs, req.StorageMB, log); err != nil {
+				os.RemoveAll(machineDir)
 				cleanup()
 				return nil, fmt.Errorf("resize rootfs to %d MB: %w", req.StorageMB, err)
 			}
@@ -170,29 +170,29 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 
 	// Always inject /init and SSH key — needed for terminal/exec even on existing volumes.
 	{
-		if err := verifyExt4Superblock(vmRootfs); err != nil {
-			os.RemoveAll(vmDir)
+		if err := verifyExt4Superblock(machineRootfs); err != nil {
+			os.RemoveAll(machineDir)
 			cleanup()
 			return nil, fmt.Errorf("rootfs is not a valid ext4 image (incomplete or wrong file?): %w", err)
 		}
 		t = time.Now()
 		pubKey := m.cfg.SSHKeyPath + ".pub"
-		if err := injectRootfs(vmRootfs, pubKey, m.logger); err != nil {
-			os.RemoveAll(vmDir)
+		if err := injectRootfs(machineRootfs, pubKey, m.logger); err != nil {
+			os.RemoveAll(machineDir)
 			cleanup()
 			return nil, fmt.Errorf("inject init/SSH into rootfs: %v", err)
 		}
 		log.Info("phase: inject_rootfs", zap.Duration("elapsed", time.Since(t)))
 	}
 
-	guestMAC := generateDeterministicMAC(req.VMID)
-	ipBootArgs := network.GetBootArgs(vmIP)
+	guestMAC := generateDeterministicMAC(req.MachineID)
+	ipBootArgs := network.GetBootArgs(machineIP)
 	if req.NetworkSubnet != "" {
-		ipBootArgs = network.GetBootArgsForSubnet(vmIP, req.NetworkSubnet)
+		ipBootArgs = network.GetBootArgsForSubnet(machineIP, req.NetworkSubnet)
 	}
 	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 quiet loglevel=0 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", ipBootArgs)
 
-	drives := []firecracker.Drive{{DriveID: "rootfs", PathOnHost: vmRootfs, IsRootDevice: true, IsReadOnly: false}}
+	drives := []firecracker.Drive{{DriveID: "rootfs", PathOnHost: machineRootfs, IsRootDevice: true, IsReadOnly: false}}
 	driveLetters := []string{"vdb", "vdc", "vdd", "vde", "vdf", "vdg", "vdh"}
 
 	// Append attached volumes
@@ -215,15 +215,15 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	}
 
 	t = time.Now()
-	pid, err := firecracker.LaunchInNamespace(m.cfg.VMBaseDir, req.VMID, m.cfg.FirecrackerBin, cfg, net.NamespaceName, req.VCPUs, req.MemoryMB, m.logger)
+	pid, err := firecracker.LaunchInNamespace(m.cfg.VMBaseDir, req.MachineID, m.cfg.FirecrackerBin, cfg, net.NamespaceName, req.VCPUs, req.MemoryMB, m.logger)
 	if err != nil {
-		os.RemoveAll(vmDir)
+		os.RemoveAll(machineDir)
 		cleanup()
 		return nil, fmt.Errorf("failed to launch firecracker: %v", err)
 	}
 	log.Info("phase: firecracker_launch", zap.Duration("elapsed", time.Since(t)), zap.Int("pid", pid))
 
-	if err := os.WriteFile(filepath.Join(vmDir, "tap_name"), []byte(net.TapName), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(machineDir, "tap_name"), []byte(net.TapName), 0644); err != nil {
 		log.Warn("failed to write tap_name", zap.Error(err))
 	}
 	spec := struct {
@@ -242,32 +242,32 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	specData, err := json.Marshal(spec)
 	if err != nil {
 		syscall.Kill(-pid, syscall.SIGKILL) // kill orphaned Firecracker process
-		os.RemoveAll(vmDir)
+		os.RemoveAll(machineDir)
 		cleanup()
 		return nil, fmt.Errorf("marshal vm_spec: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(vmDir, "vm_spec.json"), specData, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(machineDir, "vm_spec.json"), specData, 0644); err != nil {
 		syscall.Kill(-pid, syscall.SIGKILL) // kill orphaned Firecracker process
-		os.RemoveAll(vmDir)
+		os.RemoveAll(machineDir)
 		cleanup()
 		return nil, fmt.Errorf("write vm_spec.json: %w", err)
 	}
 
-	m.registerVM(&VMInfo{VMID: req.VMID, Namespace: net.NamespaceName, IP: vmIP, Status: "running", PID: pid, NetworkBridge: req.NetworkBridge})
+	m.registerMachine(&MachineInfo{MachineID: req.MachineID, Namespace: net.NamespaceName, IP: machineIP, Status: "running", PID: pid, NetworkBridge: req.NetworkBridge})
 
 	t = time.Now()
 	sshTimeout := agent.DefaultSSHTimeout
 	if m.cfg.SSHTimeoutSec > 0 {
 		sshTimeout = time.Duration(m.cfg.SSHTimeoutSec) * time.Second
 	}
-	sshReady := m.waitForSSH(vmIP, sshTimeout)
+	sshReady := m.waitForSSH(machineIP, sshTimeout)
 	log.Info("phase: ssh_wait", zap.Duration("elapsed", time.Since(t)), zap.Bool("ready", sshReady))
 
 	log.Info("create complete", zap.Duration("total", time.Since(startTime)), zap.String("boot_method", "fresh"))
 
 	msg := fmt.Sprintf("pid=%d, namespace=%s", pid, net.NamespaceName)
 	return &CreateResponse{
-		VMID: req.VMID, Status: "running", IPAddress: vmIP,
+		MachineID: req.MachineID, Status: "running", IPAddress: machineIP,
 		BootMethod: "fresh", BootTimeMS: time.Since(startTime).Milliseconds(),
 		SSHReady: sshReady, ImageSHA: sha, Message: &msg, Namespace: net.NamespaceName,
 	}, nil
@@ -539,17 +539,17 @@ func verifyExt4Superblock(path string) error {
 	return nil
 }
 
-// startVM starts a stopped VM from its existing vmDir (rootfs.ext4 and optional vm_spec.json).
-func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, error) {
+// startMachine starts a stopped machine from its existing machineDir (rootfs.ext4 and optional vm_spec.json).
+func startMachine(ctx context.Context, m *Manager, machineID string) (*CreateResponse, error) {
 	startTime := time.Now()
-	log := reqLog(ctx, m.logger, vmID)
-	vmDir := filepath.Join(m.cfg.VMBaseDir, vmID)
-	vmRootfs := filepath.Join(vmDir, "rootfs.ext4")
+	log := reqLog(ctx, m.logger, machineID)
+	machineDir := filepath.Join(m.cfg.VMBaseDir, machineID)
+	machineRootfs := filepath.Join(machineDir, "rootfs.ext4")
 
 	vcpus, memoryMB := 2, 512
 	var netBridge, netSubnet string
 	var savedReq CreateRequest // for rate limiters and other saved fields
-	if data, err := os.ReadFile(filepath.Join(vmDir, "vm_spec.json")); err == nil {
+	if data, err := os.ReadFile(filepath.Join(machineDir, "vm_spec.json")); err == nil {
 		var spec struct {
 			VCPUs          int    `json:"vcpus"`
 			MemoryMB       int    `json:"memory_mb"`
@@ -566,20 +566,20 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 				vcpus, memoryMB = spec.VCPUs, spec.MemoryMB
 			}
 			if spec.RootVolumePath != "" {
-				// Verify the root volume is still attached to THIS VM before using it.
-				// If detached (e.g. deployed to another VM), fall back to local rootfs copy.
+				// Verify the root volume is still attached to THIS machine before using it.
+				// If detached (e.g. deployed to another machine), fall back to local rootfs copy.
 				useVolume := true
 				if m.db != nil {
 					var attached sql.NullString
-					err := m.db.QueryRow("SELECT attached FROM volume WHERE path = ?", spec.RootVolumePath).Scan(&attached)
-					if err != nil || !attached.Valid || attached.String != vmID {
-						log.Warn("root volume no longer attached to this VM, using local rootfs",
+					err := m.db.QueryRow("SELECT machine_id FROM volume WHERE path = ?", spec.RootVolumePath).Scan(&attached)
+					if err != nil || !attached.Valid || attached.String != machineID {
+						log.Warn("root volume no longer attached to this machine, using local rootfs",
 							zap.String("volume_path", spec.RootVolumePath))
 						useVolume = false
 					}
 				}
 				if useVolume {
-					vmRootfs = spec.RootVolumePath
+					machineRootfs = spec.RootVolumePath
 				}
 			}
 			netBridge = spec.NetworkBridge
@@ -591,22 +591,22 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 		}
 	}
 
-	if _, err := os.Stat(vmRootfs); err != nil {
+	if _, err := os.Stat(machineRootfs); err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("VM %s has no rootfs (run deploy first)", vmID)
+			return nil, fmt.Errorf("machine %s has no rootfs (run deploy first)", machineID)
 		}
 		return nil, err
 	}
 
 	// Re-use existing IP or allocate new one
-	vmIP := network.GetAllocatedIP(m.db, vmID)
+	machineIP := network.GetAllocatedIP(m.db, machineID)
 	freshlyAllocated := false
-	if vmIP == "" {
+	if machineIP == "" {
 		var allocErr error
 		if netSubnet != "" {
-			vmIP, allocErr = network.AllocateIPInSubnet(m.db, vmID, netSubnet)
+			machineIP, allocErr = network.AllocateIPInSubnet(m.db, machineID, netSubnet)
 		} else {
-			vmIP, allocErr = network.AllocateIP(m.db, vmID)
+			machineIP, allocErr = network.AllocateIP(m.db, machineID)
 		}
 		if allocErr != nil {
 			return nil, fmt.Errorf("allocate IP: %v", allocErr)
@@ -615,32 +615,32 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 	}
 
 	t := time.Now()
-	net := network.NewVMNetwork(vmID, vmIP, m.logger, netBridge)
+	net := network.NewVMNetwork(machineID, machineIP, m.logger, netBridge)
 	net.BlockSMTP = m.cfg.BlockSMTP
 	if err := net.Create(); err != nil {
 		if freshlyAllocated {
-			network.ReleaseIP(m.db, vmID)
+			network.ReleaseIP(m.db, machineID)
 		}
 		return nil, fmt.Errorf("failed to create network namespace: %v", err)
 	}
-	log.Info("phase: network_setup", zap.Duration("elapsed", time.Since(t)), zap.String("vm_ip", vmIP))
+	log.Info("phase: network_setup", zap.Duration("elapsed", time.Since(t)), zap.String("machine_ip", machineIP))
 
-	guestMAC := generateDeterministicMAC(vmID)
+	guestMAC := generateDeterministicMAC(machineID)
 	kernelPath := m.cfg.KernelImagePath
 	initrdPath := m.cfg.KernelInitrdPath
-	startIPBootArgs := network.GetBootArgs(vmIP)
+	startIPBootArgs := network.GetBootArgs(machineIP)
 	if netSubnet != "" {
-		startIPBootArgs = network.GetBootArgsForSubnet(vmIP, netSubnet)
+		startIPBootArgs = network.GetBootArgsForSubnet(machineIP, netSubnet)
 	}
 	bootArgs := fmt.Sprintf("console=ttyS0 reboot=k panic=1 quiet loglevel=0 pci=off acpi=off root=/dev/vda rw rootfstype=ext4 init=/init i8042.noaux raid=noautodetect 8250.nr_uarts=1 net.ifnames=0 %s", startIPBootArgs)
 
-	drives := []firecracker.Drive{{DriveID: "rootfs", PathOnHost: vmRootfs, IsRootDevice: true, IsReadOnly: false}}
+	drives := []firecracker.Drive{{DriveID: "rootfs", PathOnHost: machineRootfs, IsRootDevice: true, IsReadOnly: false}}
 	driveLetters := []string{"vdb", "vdc", "vdd", "vde", "vdf", "vdg", "vdh"}
 
 	// Re-attach data volumes from DB (attached via API or --attach at deploy)
 	if m.db != nil {
 		volRows, err := m.db.Query(
-			"SELECT path FROM volume WHERE attached = ? AND role != 'root' AND status = 'attached'", vmID)
+			"SELECT path FROM volume WHERE machine_id = ? AND role != 'root' AND status = 'attached'", machineID)
 		if err == nil {
 			var dbVolPaths []string
 			for volRows.Next() {
@@ -656,9 +656,9 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 		}
 	}
 
-	// Fallback: also check vm_spec.json for backward compat (old VMs without DB volumes)
+	// Fallback: also check vm_spec.json for backward compat (old machines without DB volumes)
 	if m.db == nil {
-		if specData, err := os.ReadFile(filepath.Join(vmDir, "vm_spec.json")); err == nil {
+		if specData, err := os.ReadFile(filepath.Join(machineDir, "vm_spec.json")); err == nil {
 			var spec struct {
 				AttachedStorage []string `json:"attached_storage"`
 			}
@@ -685,31 +685,31 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 	}
 
 	t = time.Now()
-	pid, err := firecracker.LaunchInNamespace(m.cfg.VMBaseDir, vmID, m.cfg.FirecrackerBin, cfg, net.NamespaceName, vcpus, memoryMB, m.logger)
+	pid, err := firecracker.LaunchInNamespace(m.cfg.VMBaseDir, machineID, m.cfg.FirecrackerBin, cfg, net.NamespaceName, vcpus, memoryMB, m.logger)
 	if err != nil {
 		net.Cleanup(m.cfg.HostInterface)
 		if freshlyAllocated {
-			network.ReleaseIP(m.db, vmID)
+			network.ReleaseIP(m.db, machineID)
 		}
 		return nil, fmt.Errorf("failed to launch firecracker: %v", err)
 	}
 	log.Info("phase: firecracker_launch", zap.Duration("elapsed", time.Since(t)), zap.Int("pid", pid))
 
-	_ = os.WriteFile(filepath.Join(vmDir, "tap_name"), []byte(net.TapName), 0644)
+	_ = os.WriteFile(filepath.Join(machineDir, "tap_name"), []byte(net.TapName), 0644)
 
-	m.registerVM(&VMInfo{VMID: vmID, Namespace: net.NamespaceName, IP: vmIP, Status: "running", PID: pid, NetworkBridge: netBridge})
+	m.registerMachine(&MachineInfo{MachineID: machineID, Namespace: net.NamespaceName, IP: machineIP, Status: "running", PID: pid, NetworkBridge: netBridge})
 
-	// Restore port rules from DB (stop cleaned iptables but kept DB rows)
+	// Restore port rules from DB (stop cleaned nftables but kept DB rows)
 	if m.db != nil {
-		prRows, prErr := m.db.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", vmID)
+		prRows, prErr := m.db.Query("SELECT host_port, machine_port, protocol FROM port_rule WHERE machine_id = ?", machineID)
 		if prErr == nil {
 			restored := 0
 			for prRows.Next() {
-				var hp, vp int
+				var hp, mp int
 				var proto string
-				if prRows.Scan(&hp, &vp, &proto) == nil {
-					n := network.NewVMNetwork(vmID, vmIP, m.logger, netBridge)
-					if n.ExposePort(m.cfg.HostInterface, hp, vp, proto) == nil {
+				if prRows.Scan(&hp, &mp, &proto) == nil {
+					n := network.NewVMNetwork(machineID, machineIP, m.logger, netBridge)
+					if n.ExposePort(m.cfg.HostInterface, hp, mp, proto) == nil {
 						restored++
 					}
 				}
@@ -726,12 +726,12 @@ func startVM(ctx context.Context, m *Manager, vmID string) (*CreateResponse, err
 	if m.cfg.SSHTimeoutSec > 0 {
 		sshTimeout = time.Duration(m.cfg.SSHTimeoutSec) * time.Second
 	}
-	sshReady := m.waitForSSH(vmIP, sshTimeout)
+	sshReady := m.waitForSSH(machineIP, sshTimeout)
 	log.Info("phase: ssh_wait", zap.Duration("elapsed", time.Since(t)), zap.Bool("ready", sshReady))
 
 	msg := fmt.Sprintf("pid=%d, namespace=%s (started from existing rootfs)", pid, net.NamespaceName)
 	return &CreateResponse{
-		VMID: vmID, Status: "running", IPAddress: vmIP,
+		MachineID: machineID, Status: "running", IPAddress: machineIP,
 		BootMethod: "start", BootTimeMS: time.Since(startTime).Milliseconds(),
 		SSHReady: sshReady, Message: &msg, Namespace: net.NamespaceName,
 	}, nil
@@ -831,14 +831,14 @@ func mbpsToRL(mbps int) *firecracker.RateLimiter {
 // buildRateLimiters resolves effective limits (request > 0 wins, else config default)
 // and returns Firecracker rate limiters for network (rx/tx separate) and disk.
 func buildRateLimiters(cfg *config.Config, req *CreateRequest) (rxRL, txRL, diskRL *firecracker.RateLimiter) {
-	// Network download (rx = into VM)
+	// Network download (rx = into machine)
 	dlMbps := req.BandwidthMbps
 	if dlMbps <= 0 {
 		dlMbps = cfg.DefaultBandwidthMbps
 	}
 	rxRL = mbpsToRL(dlMbps)
 
-	// Network upload (tx = out of VM) — separate, lower limit
+	// Network upload (tx = out of machine) — separate, lower limit
 	ulMbps := req.UploadMbps
 	if ulMbps <= 0 {
 		ulMbps = cfg.DefaultUploadMbps

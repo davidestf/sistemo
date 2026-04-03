@@ -1,9 +1,9 @@
-// Package vm provides VM lifecycle management.
-package vm
+// Package machine provides machine lifecycle management.
+package machine
 
-// CreateRequest is the API payload for creating a VM.
+// CreateRequest is the API payload for creating a machine.
 type CreateRequest struct {
-	VMID            string            `json:"vm_id"`
+	MachineID       string            `json:"machine_id"`
 	Image           string            `json:"image"`
 	VCPUs           int               `json:"vcpus"`
 	MemoryMB        int               `json:"memory_mb"`
@@ -16,20 +16,20 @@ type CreateRequest struct {
 	DiskBWMbps      int               `json:"disk_bw_mbps,omitempty"`
 	// InjectInitSSH: inject /init and SSH key into rootfs so terminal/exec work.
 	InjectInitSSH bool `json:"inject_init_ssh,omitempty"`
-	// RootVolumePath: if set, the image is copied here instead of vmDir/rootfs.ext4.
+	// RootVolumePath: if set, the image is copied here instead of machineDir/rootfs.ext4.
 	// The handler creates a managed volume at this path; createFresh uses it as the rootfs destination.
 	RootVolumePath string `json:"root_volume_path,omitempty"`
 	// UseExistingVolume: if true, RootVolumePath already has data — skip image copy and resize.
 	// SSH key injection still runs so terminal/exec work.
 	UseExistingVolume bool `json:"use_existing_volume,omitempty"`
-	// Named network: if set, VM is attached to this bridge instead of sistemo0.
+	// Named network: if set, machine is attached to this bridge instead of sistemo0.
 	NetworkBridge string `json:"network_bridge,omitempty"`
 	NetworkSubnet string `json:"network_subnet,omitempty"`
 }
 
-// CreateResponse is returned after VM creation.
+// CreateResponse is returned after machine creation.
 type CreateResponse struct {
-	VMID       string  `json:"vm_id"`
+	MachineID  string  `json:"machine_id"`
 	Status     string  `json:"status"`
 	IPAddress  string  `json:"ip_address"`
 	BootMethod string  `json:"boot_method"`
@@ -40,9 +40,9 @@ type CreateResponse struct {
 	Namespace  string  `json:"namespace,omitempty"`
 }
 
-// VMInfo holds runtime information about a VM.
-type VMInfo struct {
-	VMID          string `json:"vm_id"`
+// MachineInfo holds runtime information about a machine.
+type MachineInfo struct {
+	MachineID     string `json:"machine_id"`
 	PID           int    `json:"pid"`
 	Namespace     string `json:"namespace"`
 	IP            string `json:"ip"`
@@ -50,7 +50,7 @@ type VMInfo struct {
 	NetworkBridge string `json:"network_bridge,omitempty"` // empty = sistemo0 (default)
 }
 
-// ExecResult holds the result of command execution on a VM.
+// ExecResult holds the result of command execution on a machine.
 type ExecResult struct {
 	ExitCode int    `json:"exit_code"`
 	Stdout   string `json:"stdout"`
@@ -59,14 +59,14 @@ type ExecResult struct {
 
 // IPResult holds IP discovery results.
 type IPResult struct {
-	VMID          string  `json:"vm_id"`
+	MachineID     string  `json:"machine_id"`
 	IP            *string `json:"ip,omitempty"`
 	Namespace     *string `json:"namespace,omitempty"`
 	DiscoveredVia *string `json:"discovered_via,omitempty"`
 }
 
-// DeleteResponse is returned after VM deletion.
+// DeleteResponse is returned after machine deletion.
 type DeleteResponse struct {
-	VMID       string `json:"vm_id"`
+	MachineID  string `json:"machine_id"`
 	Terminated bool   `json:"terminated"`
 }

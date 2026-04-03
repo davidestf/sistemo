@@ -22,7 +22,7 @@
 
   const navItems = [
     { path: '#/', label: 'Dashboard', icon: 'home' },
-    { path: '#/vms', label: 'Virtual Machines', icon: 'server' },
+    { path: '#/machines', label: 'Machines', icon: 'server' },
     { path: '#/images', label: 'Images', icon: 'image' },
     { path: '#/volumes', label: 'Volumes', icon: 'volume' },
     { path: '#/networks', label: 'Networks', icon: 'network' },

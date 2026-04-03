@@ -1,4 +1,4 @@
-package vm
+package machine
 
 import (
 	_ "embed"
@@ -10,7 +10,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// initScriptContent is the Sistemo VM /init script embedded from vm-init.sh.
+// initScriptContent is the Sistemo microVM /init script embedded from vm-init.sh.
 //
 //go:embed vm-init.sh
 var initScriptContent []byte

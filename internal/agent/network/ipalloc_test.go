@@ -10,8 +10,8 @@ import (
 )
 
 // setupTestDB creates an in-memory SQLite database with the ip_allocation table.
-// Uses the schema from 003_bridge_network.sql plus UNIQUE(vm_id) to enforce one
-// IP per VM. Foreign keys are disabled so we don't need the vm table.
+// Uses the schema from 003_bridge_network.sql plus UNIQUE(machine_id) to enforce one
+// IP per machine. Foreign keys are disabled so we don't need the machine table.
 func setupTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared&_pragma=foreign_keys(0)&_pragma=busy_timeout(5000)", t.Name())
@@ -24,10 +24,10 @@ func setupTestDB(t *testing.T) *sql.DB {
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS ip_allocation (
 			ip TEXT PRIMARY KEY,
-			vm_id TEXT NOT NULL UNIQUE,
+			machine_id TEXT NOT NULL UNIQUE,
 			allocated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		);
-		CREATE INDEX IF NOT EXISTS idx_ip_allocation_vm ON ip_allocation(vm_id);
+		CREATE INDEX IF NOT EXISTS idx_ip_allocation_machine ON ip_allocation(machine_id);
 	`)
 	if err != nil {
 		t.Fatalf("create ip_allocation table: %v", err)
@@ -140,12 +140,12 @@ func TestAllocateIP_SameVMTwice(t *testing.T) {
 		t.Fatalf("first allocate: %v", err)
 	}
 
-	// Second allocation for the same VM should fail due to UNIQUE constraint on vm_id.
-	// AllocateIP iterates candidate IPs; each INSERT fails on vm_id uniqueness,
+	// Second allocation for the same machine should fail due to UNIQUE constraint on machine_id.
+	// AllocateIP iterates candidate IPs; each INSERT fails on machine_id uniqueness,
 	// eventually returning "no free IPs".
 	_, err = AllocateIP(db, "vm-dup")
 	if err == nil {
-		t.Error("expected error on duplicate vm_id allocation, got nil")
+		t.Error("expected error on duplicate machine_id allocation, got nil")
 	}
 }
 

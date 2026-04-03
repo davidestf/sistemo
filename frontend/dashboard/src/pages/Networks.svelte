@@ -145,7 +145,7 @@
               <th class="text-left text-xs font-medium text-muted uppercase tracking-wider px-4 py-3">Name</th>
               <th class="text-left text-xs font-medium text-muted uppercase tracking-wider px-4 py-3">Subnet</th>
               <th class="text-left text-xs font-medium text-muted uppercase tracking-wider px-4 py-3">Bridge</th>
-              <th class="text-left text-xs font-medium text-muted uppercase tracking-wider px-4 py-3">VMs</th>
+              <th class="text-left text-xs font-medium text-muted uppercase tracking-wider px-4 py-3">Machines</th>
               <th class="text-left text-xs font-medium text-muted uppercase tracking-wider px-4 py-3">Created</th>
               <th class="text-right text-xs font-medium text-muted uppercase tracking-wider px-4 py-3">Actions</th>
             </tr>
@@ -156,7 +156,7 @@
                 <td class="px-4 py-3 font-medium text-text text-sm">{net.name}</td>
                 <td class="px-4 py-3 font-mono text-accent text-sm">{net.subnet}</td>
                 <td class="px-4 py-3 text-muted text-sm">{net.bridge_name}</td>
-                <td class="px-4 py-3 text-muted text-sm">{net.vm_count}</td>
+                <td class="px-4 py-3 text-muted text-sm">{net.machine_count}</td>
                 <td class="px-4 py-3 text-muted text-sm">{net.created_at ? timeAgo(net.created_at) : '-'}</td>
                 <td class="px-4 py-3 text-right">
                   {#if net.name !== 'default'}
@@ -181,8 +181,8 @@
   onconfirm={handleDelete}
 >
   {#if deleteTarget}
-    {#if deleteTarget.vm_count > 0}
-      <p class="text-warning mb-2">Warning: This network has {deleteTarget.vm_count} VM{deleteTarget.vm_count === 1 ? '' : 's'} attached.</p>
+    {#if deleteTarget.machine_count > 0}
+      <p class="text-warning mb-2">Warning: This network has {deleteTarget.machine_count} machine{deleteTarget.machine_count === 1 ? '' : 's'} attached.</p>
     {/if}
     <p>Are you sure you want to delete network <strong class="text-text">{deleteTarget.name}</strong>?</p>
   {/if}

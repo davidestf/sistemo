@@ -106,7 +106,7 @@
       <EmptyState
         message="No images yet. Download from registry or build from Docker."
         action="Deploy VM"
-        onaction={() => { window.location.hash = '#/vms/create'; }}
+        onaction={() => { window.location.hash = '#/machines/create'; }}
       />
     {:else}
       <Card padding={false}>
@@ -144,7 +144,7 @@
                     <div class="flex items-center justify-end gap-2">
                       <Button variant="primary" size="sm" onclick={() => {
                         sessionStorage.setItem('sistemo_deploy_image', JSON.stringify({ path: img.path, name: img.name }));
-                        window.location.hash = '#/vms/create';
+                        window.location.hash = '#/machines/create';
                       }}>Deploy</Button>
                       <Button variant="danger" size="sm" onclick={() => { deleteTarget = img; }}>Delete</Button>
                     </div>

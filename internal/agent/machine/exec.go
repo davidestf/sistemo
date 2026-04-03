@@ -1,4 +1,4 @@
-package vm
+package machine
 
 import (
 	"bytes"
@@ -11,17 +11,17 @@ import (
 	"time"
 )
 
-// execOnVM runs a script on a VM via SSH through its network namespace.
-func execOnVM(ctx context.Context, m *Manager, vmID, script string, timeoutSec int) (*ExecResult, error) {
+// execOnMachine runs a script on a machine via SSH through its network namespace.
+func execOnMachine(ctx context.Context, m *Manager, machineID, script string, timeoutSec int) (*ExecResult, error) {
 	m.mu.RLock()
-	info, ok := m.vms[vmID]
-	var vmIP string
+	info, ok := m.machines[machineID]
+	var machineIP string
 	if ok {
-		vmIP = info.IP
+		machineIP = info.IP
 	}
 	m.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("VM %s not found", vmID)
+		return nil, fmt.Errorf("machine %s not found", machineID)
 	}
 
 	if timeoutSec <= 0 {
@@ -47,11 +47,11 @@ func execOnVM(ctx context.Context, m *Manager, vmID, script string, timeoutSec i
 		"-o", "PasswordAuthentication=no",
 		"-o", "AddressFamily=inet",
 		"-o", "ConnectTimeout=8",
-		fmt.Sprintf("%s@%s", m.cfg.SSHUser, vmIP),
+		fmt.Sprintf("%s@%s", m.cfg.SSHUser, machineIP),
 		script,
 	}
 
-	// With bridge architecture, VM has a unique IP reachable from the host directly
+	// With bridge architecture, machine has a unique IP reachable from the host directly
 	cmd := exec.CommandContext(ctx, "ssh", sshArgs...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 

@@ -18,7 +18,7 @@ import (
 	"github.com/davidestf/sistemo/internal/agent/api"
 	"github.com/davidestf/sistemo/internal/agent/config"
 	"github.com/davidestf/sistemo/internal/agent/network"
-	"github.com/davidestf/sistemo/internal/agent/vm"
+	"github.com/davidestf/sistemo/internal/agent/machine"
 	"github.com/davidestf/sistemo/internal/db"
 )
 
@@ -228,7 +228,7 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 	// 'error' VMs are NOT cleaned — they have valid rootfs and need user attention.
 	// 'stopped' VMs are NOT cleaned — they are restartable.
 	{
-		rows, _ := database.Query(`SELECT id FROM vm WHERE status IN ('maintenance', 'failed')`)
+		rows, _ := database.Query(`SELECT id FROM machine WHERE status IN ('maintenance', 'failed')`)
 		if rows != nil {
 			var staleIDs []string
 			for rows.Next() {
@@ -239,54 +239,53 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 			}
 			rows.Close()
 			for _, id := range staleIDs {
-				vmDir := filepath.Join(dataDir, "vms", id)
-				os.RemoveAll(vmDir)
-				db.SafeExec(database, `DELETE FROM ip_allocation WHERE vm_id = ?`, id)
-				db.SafeExec(database, `DELETE FROM port_rule WHERE vm_id = ?`, id)
-				db.SafeExec(database, `UPDATE volume SET status='online', attached=NULL WHERE attached = ?`, id)
-				db.SafeExec(database, `DELETE FROM vm WHERE id = ?`, id)
+				machineDir := filepath.Join(dataDir, "vms", id)
+				os.RemoveAll(machineDir)
+				db.SafeExec(database, `DELETE FROM ip_allocation WHERE machine_id = ?`, id)
+				db.SafeExec(database, `DELETE FROM port_rule WHERE machine_id = ?`, id)
+				db.SafeExec(database, `UPDATE volume SET status='online', machine_id=NULL WHERE machine_id = ?`, id)
+				db.SafeExec(database, `DELETE FROM machine WHERE id = ?`, id)
 			}
 			if len(staleIDs) > 0 {
-				logger.Info("cleaned up failed VMs from previous run", zap.Int("count", len(staleIDs)))
+				logger.Info("cleaned up failed machines from previous run", zap.Int("count", len(staleIDs)))
 			}
 		}
 	}
 
-	// Clean up stale iptables port rules for VMs that no longer exist.
-	// This handles the case where the daemon was killed with VMs still running.
+	// Clean up stale nftables port rules for machines that no longer exist.
+	// This handles the case where the daemon was killed with machines still running.
 	{
-		rows, _ := database.Query(`SELECT pr.vm_id, pr.host_port, pr.vm_port, pr.protocol
-			FROM port_rule pr LEFT JOIN vm v ON pr.vm_id = v.id
-			WHERE v.id IS NULL OR v.status = 'deleted'`)
+		rows, _ := database.Query(`SELECT pr.machine_id, pr.host_port, pr.machine_port, pr.protocol
+			FROM port_rule pr LEFT JOIN machine m ON pr.machine_id = m.id
+			WHERE m.id IS NULL OR m.status = 'deleted'`)
 		if rows != nil {
-			var staleVMIDs []string
+			var staleMachineIDs []string
 			cleaned := 0
 			for rows.Next() {
-				var vmID string
-				var hostPort, vmPort int
+				var machineID string
+				var hostPort, machinePort int
 				var protocol string
-				if rows.Scan(&vmID, &hostPort, &vmPort, &protocol) == nil {
-					vmIP := network.GetAllocatedIP(database, vmID)
-					if vmIP != "" {
+				if rows.Scan(&machineID, &hostPort, &machinePort, &protocol) == nil {
+					machineIP := network.GetAllocatedIP(database, machineID)
+					if machineIP != "" {
 						// Read bridge from vm_spec.json if it exists
 						var bridge string
-						specPath := filepath.Join(dataDir, "vms", vmID, "vm_spec.json")
+						specPath := filepath.Join(dataDir, "vms", machineID, "vm_spec.json")
 						if specData, err := os.ReadFile(specPath); err == nil {
 							var spec struct{ NetworkBridge string `json:"network_bridge"` }
 							json.Unmarshal(specData, &spec)
 							bridge = spec.NetworkBridge
 						}
-						n := network.NewVMNetwork(vmID, vmIP, logger, bridge)
-						n.UnexposePort(cfg.HostInterface, hostPort, vmPort, protocol)
+						n := network.NewVMNetwork(machineID, machineIP, logger, bridge)
+						n.UnexposePort(cfg.HostInterface, hostPort, machinePort, protocol)
 					}
-					staleVMIDs = append(staleVMIDs, vmID)
+					staleMachineIDs = append(staleMachineIDs, machineID)
 					cleaned++
 				}
 			}
 			rows.Close()
-			// Delete stale port_rule rows (SQLite doesn't support aliases in DELETE)
-			for _, id := range staleVMIDs {
-				db.SafeExec(database, `DELETE FROM port_rule WHERE vm_id = ?`, id)
+			for _, id := range staleMachineIDs {
+				db.SafeExec(database, `DELETE FROM port_rule WHERE machine_id = ?`, id)
 			}
 			if cleaned > 0 {
 				logger.Info("cleaned up stale port rules from previous run", zap.Int("count", cleaned))
@@ -294,9 +293,9 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 		}
 	}
 
-	// Clean up stale ip_allocation rows for deleted or missing VMs.
-	// Keep IPs for running, stopped, AND error VMs (all are restartable).
-	db.SafeExec(database, `DELETE FROM ip_allocation WHERE vm_id NOT IN (SELECT id FROM vm WHERE status IN ('running', 'stopped', 'error'))`)
+	// Clean up stale ip_allocation rows for deleted or missing machines.
+	// Keep IPs for running, stopped, AND error machines (all are restartable).
+	db.SafeExec(database, `DELETE FROM ip_allocation WHERE machine_id NOT IN (SELECT id FROM machine WHERE status IN ('running', 'stopped', 'error'))`)
 
 	if syscall.Geteuid() != 0 {
 		logger.Warn("daemon running as non-root — VM create will fail (mount/namespace need root). Stop and run: sudo ./sistemo up")
@@ -306,7 +305,7 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 		return fmt.Errorf("get JWT secret: %w", err)
 	}
 
-	mgr := vm.NewManager(context.Background(), cfg, logger, database)
+	mgr := machine.NewManager(context.Background(), cfg, logger, database)
 	router := api.NewRouter(cfg, mgr, logger, database, []byte(jwtSecret), api.RouterOpts{
 		BuildScript:  embeddedBuildScript,
 		VMInitScript: embeddedVMInit,

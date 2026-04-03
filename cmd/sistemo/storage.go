@@ -19,11 +19,11 @@ func volumeCmd() *cobra.Command {
 	return cmd
 }
 
-// vmVolumeCmd returns the "vm volume" subcommand group for attach/detach.
-func vmVolumeCmd() *cobra.Command {
+// machineVolumeCmd returns the "machine volume" subcommand group for attach/detach.
+func machineVolumeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "volume",
-		Short: "Attach or detach volumes from a VM",
+		Short: "Attach or detach volumes from a machine",
 	}
 	cmd.AddCommand(volumeAttachCmd())
 	cmd.AddCommand(volumeDetachCmd())

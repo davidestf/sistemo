@@ -15,7 +15,7 @@ func TestLookupVM_ByName(t *testing.T) {
 
 	// Insert a VM
 	database.Exec(
-		`INSERT INTO vm (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
+		`INSERT INTO machine (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
 		 VALUES ('abc-123', 'web-server', 'running', 'debian', 2, 512, 2048, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	)
 
@@ -37,7 +37,7 @@ func TestLookupVM_ByID(t *testing.T) {
 	t.Cleanup(func() { database.Close() })
 
 	database.Exec(
-		`INSERT INTO vm (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
+		`INSERT INTO machine (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
 		 VALUES ('abc-123', 'web-server', 'running', 'debian', 2, 512, 2048, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	)
 
@@ -59,7 +59,7 @@ func TestLookupVM_ExcludesDeleted(t *testing.T) {
 	t.Cleanup(func() { database.Close() })
 
 	database.Exec(
-		`INSERT INTO vm (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
+		`INSERT INTO machine (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
 		 VALUES ('abc-123', 'dead-vm', 'deleted', 'debian', 2, 512, 2048, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	)
 
@@ -91,7 +91,7 @@ func TestLookupVM_ExcludesCustomStatuses(t *testing.T) {
 	t.Cleanup(func() { database.Close() })
 
 	database.Exec(
-		`INSERT INTO vm (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
+		`INSERT INTO machine (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
 		 VALUES ('vm-001', 'error-vm', 'error', 'debian', 2, 512, 2048, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	)
 
@@ -119,7 +119,7 @@ func TestLookupVM_MultipleExcludeStatuses(t *testing.T) {
 	t.Cleanup(func() { database.Close() })
 
 	database.Exec(
-		`INSERT INTO vm (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
+		`INSERT INTO machine (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
 		 VALUES ('vm-001', 'stopped-vm', 'stopped', 'debian', 2, 512, 2048, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	)
 
@@ -139,7 +139,7 @@ func TestLookupVM_PrefersIDOverName(t *testing.T) {
 
 	// Create a VM whose name matches another VM's ID
 	database.Exec(
-		`INSERT INTO vm (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
+		`INSERT INTO machine (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
 		 VALUES ('vm-001', 'web', 'running', 'debian', 2, 512, 2048, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	)
 
@@ -161,7 +161,7 @@ func TestLookupVM_RunningVM(t *testing.T) {
 	t.Cleanup(func() { database.Close() })
 
 	database.Exec(
-		`INSERT INTO vm (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
+		`INSERT INTO machine (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
 		 VALUES ('vm-run', 'running-vm', 'running', 'debian', 2, 512, 2048, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	)
 
@@ -182,7 +182,7 @@ func TestLookupVM_StoppedVM(t *testing.T) {
 	t.Cleanup(func() { database.Close() })
 
 	database.Exec(
-		`INSERT INTO vm (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
+		`INSERT INTO machine (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
 		 VALUES ('vm-stop', 'stopped-vm', 'stopped', 'debian', 2, 512, 2048, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	)
 
