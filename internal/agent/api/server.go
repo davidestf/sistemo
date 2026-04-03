@@ -23,6 +23,7 @@ import (
 type RouterOpts struct {
 	BuildScript  []byte // embedded build-rootfs.sh for Docker image builds
 	VMInitScript []byte // embedded vm-init.sh for Docker image builds
+	TiniStatic   []byte // embedded tini static binary for PID 1 signal handling
 }
 
 // NewRouter builds the HTTP router with authentication middleware.
@@ -78,6 +79,7 @@ func NewRouter(cfg *config.Config, mgr *machine.Manager, logger *zap.Logger, db 
 	if len(opts) > 0 {
 		dashAPI.BuildScript = opts[0].BuildScript
 		dashAPI.VMInitScript = opts[0].VMInitScript
+		dashAPI.TiniStatic = opts[0].TiniStatic
 	}
 
 	sessionTTL := time.Duration(cfg.SessionTimeoutHours) * time.Hour
@@ -146,6 +148,7 @@ func NewRouter(cfg *config.Config, mgr *machine.Manager, logger *zap.Logger, db 
 		r.Post("/registry/download", dashAPI.RegistryDownload)
 		r.Delete("/images/{name}", dashAPI.ImageDelete)
 		r.Post("/images/build", dashAPI.ImageBuild)
+		r.Post("/images/build/dockerfile", dashAPI.DockerfileBuild)
 		r.Get("/images/build/{name}/status", dashAPI.ImageBuildStatus)
 		r.Get("/images/build/{id}/logs", dashAPI.ImageBuildLogs)
 		r.Post("/images/build/{name}/cancel", dashAPI.ImageBuildCancel)

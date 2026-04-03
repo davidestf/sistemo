@@ -314,6 +314,7 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 	router := api.NewRouter(cfg, mgr, logger, database, []byte(jwtSecret), api.RouterOpts{
 		BuildScript:  embeddedBuildScript,
 		VMInitScript: embeddedVMInit,
+		TiniStatic:   embeddedTiniStatic,
 	})
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Port),

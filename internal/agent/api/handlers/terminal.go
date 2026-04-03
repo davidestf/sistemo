@@ -226,6 +226,7 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("terminal initial size", zap.Uint16("rows", initialRows), zap.Uint16("cols", initialCols))
 
 	sshArgs := []string{
+		"-t", "-t", // force PTY allocation (needed for Docker metadata mode where sshd runs without systemd)
 		"-i", h.cfg.SSHKeyPath,
 		"-o", "StrictHostKeyChecking=no",
 		"-o", "UserKnownHostsFile=/dev/null",
