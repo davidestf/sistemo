@@ -73,6 +73,8 @@ export interface BuildStatus {
   message: string;
   started_at: string;
   image_digest?: string;
+  progress?: number;      // 0-100 build progress percentage
+  progress_msg?: string;  // current build step description
 }
 
 export interface NetworkInfo {

@@ -63,6 +63,10 @@ type Config struct {
 	RateLimitRPS   int `envconfig:"RATE_LIMIT_RPS" default:"100"`
 	RateLimitBurst int `envconfig:"RATE_LIMIT_BURST" default:"200"`
 
+	// Image build timeout in minutes. Default: 60 minutes.
+	// Large Docker images may need more time. Set to 0 for no timeout.
+	BuildTimeoutMin int `envconfig:"BUILD_TIMEOUT_MIN" default:"60"`
+
 	// Dashboard session timeout in hours. Default: 8 hours.
 	SessionTimeoutHours int `envconfig:"SESSION_TIMEOUT_HOURS" default:"8"`
 

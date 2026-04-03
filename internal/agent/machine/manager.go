@@ -46,7 +46,7 @@ func NewManager(ctx context.Context, cfg *config.Config, logger *zap.Logger, db 
 		logger.Fatal("invalid bridge_subnet", zap.Error(err))
 	}
 	if err := network.EnsureBridge(cfg.HostInterface, logger); err != nil {
-		logger.Fatal("failed to create bridge — machine networking will not work", zap.Error(err))
+		logger.Warn("failed to create bridge — machine networking will not work (run as root: sudo sistemo up)", zap.Error(err))
 	}
 	m.recreateNamedBridges()
 	m.cleanupStaleBridges()

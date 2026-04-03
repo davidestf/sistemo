@@ -131,6 +131,12 @@ func EnsureBridge(_ string, logger *zap.Logger) error {
 		return fmt.Errorf("bridge forward rules: %w", err)
 	}
 
+	// Compat: insert accept rules into system filter tables (Debian/Ubuntu have
+	// a default `table inet filter` with forward chain policy drop).
+	if err := firewall.EnsureSystemForward(BridgeName); err != nil {
+		logger.Warn("could not insert system forward rules (VMs may lack internet)", zap.Error(err))
+	}
+
 	logger.Info("bridge ready",
 		zap.String("bridge", BridgeName),
 		zap.String("subnet", BridgeCIDR),
@@ -193,6 +199,9 @@ func CreateNamedBridge(bridgeName, cidr string, logger *zap.Logger) error {
 	if err := firewall.EnsureBridgeRules(bridgeName); err != nil {
 		return fmt.Errorf("named bridge forward rules: %w", err)
 	}
+
+	// Compat: system filter table forward rules
+	firewall.EnsureSystemForward(bridgeName)
 
 	// ISOLATION: block traffic between this bridge and all other sistemo-managed bridges.
 	if err := firewall.EnsureIsolation(bridgeName, BridgeName); err != nil {

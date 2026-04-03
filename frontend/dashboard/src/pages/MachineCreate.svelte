@@ -35,6 +35,23 @@
   let building = $state(false);
   let buildPollTimer = $state<ReturnType<typeof setInterval> | null>(null);
 
+  // --- Build logs ---
+  let showBuildLogs = $state(false);
+  let buildLogs = $state<string[]>([]);
+  let buildLogsLoading = $state(false);
+
+  async function fetchBuildLogs() {
+    if (!buildStatus?.id) return;
+    buildLogsLoading = true;
+    try {
+      const data = await get<{ lines: string[]; total: number }>(`/api/v1/images/build/${encodeURIComponent(buildStatus.id)}/logs?tail=200`);
+      buildLogs = data.lines ?? [];
+    } catch {
+      buildLogs = ['Failed to load logs'];
+    }
+    buildLogsLoading = false;
+  }
+
   // --- URL tab ---
   let imageUrl = $state('');
 
@@ -111,12 +128,16 @@
     }
   }
 
+  let pollErrors = 0;
+
   function startBuildPolling(buildKey: string) {
     if (buildPollTimer) clearInterval(buildPollTimer);
+    pollErrors = 0;
     buildPollTimer = setInterval(async () => {
       try {
         const status = await get<BuildStatus>(`/api/v1/images/build/${encodeURIComponent(buildKey)}/status`);
         buildStatus = status;
+        pollErrors = 0;
 
         if (status.status === 'complete') {
           if (buildPollTimer) clearInterval(buildPollTimer);
@@ -124,7 +145,6 @@
           building = false;
           addToast('Build complete', 'success');
           await fetchData();
-          // Match by image_digest (preferred) or build_name (fallback)
           let built = status.image_digest
             ? localImages.find(l => l.digest === status.image_digest)
             : null;
@@ -142,9 +162,15 @@
           addToast(`Build failed: ${status.message}`, 'error');
         }
       } catch {
-        // Keep polling on transient errors
+        pollErrors++;
+        if (pollErrors > 10) {
+          if (buildPollTimer) clearInterval(buildPollTimer);
+          buildPollTimer = null;
+          building = false;
+          addToast('Lost connection to build — check dashboard', 'error');
+        }
       }
-    }, 2000);
+    }, 3000);
   }
 
   $effect(() => {
@@ -311,7 +337,15 @@
       addToast('Machine deployed successfully', 'success');
       window.location.hash = '#/machines';
     } catch (err) {
-      addToast(err instanceof Error ? err.message : 'Failed to deploy machine', 'error');
+      const msg = err instanceof Error ? err.message : 'Failed to deploy machine';
+      // Browser "NetworkError" usually means the request was interrupted (timeout, connection reset).
+      // The machine may have been created — check the machines list.
+      if (msg.includes('NetworkError') || msg.includes('fetch')) {
+        addToast('Connection interrupted during deploy — the machine may still be starting. Check the machines list.', 'warning');
+        window.location.hash = '#/machines';
+      } else {
+        addToast(msg, 'error');
+      }
     } finally {
       deploying = false;
     }
@@ -442,7 +476,7 @@
             <div class="flex items-center gap-2 mb-2">
               {#if buildStatus.status === 'building'}
                 <Spinner size="sm" />
-                <span class="text-sm font-medium text-accent">Building image...</span>
+                <span class="text-sm font-medium text-accent">{buildStatus.progress_msg || 'Building image...'}</span>
                 <button
                   onclick={async () => {
                     try {
@@ -469,9 +503,49 @@
                 <span class="text-sm font-medium text-error">Build failed</span>
               {/if}
             </div>
-            {#if buildStatus.message}
-              <pre class="text-xs text-muted bg-terminal rounded p-2 mt-1 overflow-x-auto max-h-32 whitespace-pre-wrap">{buildStatus.message}</pre>
+            {#if buildStatus.status === 'building' && (buildStatus.progress ?? 0) > 0}
+              <div class="w-full bg-surface-2 rounded-full h-1.5 mt-2">
+                <div class="bg-accent h-1.5 rounded-full transition-all duration-500" style="width: {buildStatus.progress}%"></div>
+              </div>
             {/if}
+            {#if buildStatus.status === 'error' && buildStatus.message}
+              <pre class="text-xs text-muted bg-terminal rounded p-2 mt-2 overflow-x-auto max-h-32 whitespace-pre-wrap">{buildStatus.message}</pre>
+            {/if}
+            <div class="mt-2">
+              <button
+                onclick={() => { showBuildLogs = !showBuildLogs; if (showBuildLogs) fetchBuildLogs(); }}
+                class="text-xs text-muted hover:text-accent cursor-pointer bg-transparent border-none transition flex items-center gap-1"
+              >
+                <svg class="w-3 h-3 transition-transform {showBuildLogs ? 'rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                </svg>
+                {showBuildLogs ? 'Hide' : 'Show'} build logs
+                {#if buildStatus.status === 'building'}
+                  <button
+                    onclick={(e) => { e.stopPropagation(); fetchBuildLogs(); }}
+                    class="ml-1 text-muted hover:text-accent cursor-pointer bg-transparent border-none"
+                    title="Refresh logs"
+                  >
+                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  </button>
+                {/if}
+              </button>
+              {#if showBuildLogs}
+                <div class="mt-1 bg-terminal rounded-lg border border-border overflow-hidden">
+                  {#if buildLogsLoading && buildLogs.length === 0}
+                    <div class="p-3 text-xs text-muted flex items-center gap-2">
+                      <Spinner size="sm" /> Loading logs...
+                    </div>
+                  {:else if buildLogs.length === 0}
+                    <div class="p-3 text-xs text-muted">No logs available yet</div>
+                  {:else}
+                    <pre class="text-xs text-muted p-3 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre font-mono leading-relaxed">{buildLogs.join('\n')}</pre>
+                  {/if}
+                </div>
+              {/if}
+            </div>
           </div>
         {/if}
       </Card>

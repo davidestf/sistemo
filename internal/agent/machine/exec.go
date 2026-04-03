@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"syscall"
@@ -81,28 +80,13 @@ func execOnMachine(ctx context.Context, m *Manager, machineID, script string, ti
 }
 
 func copyFile(src, dst string) error {
-	srcFile, err := os.Open(src)
+	// Use cp --sparse=always to preserve sparse files. Build images are typically
+	// 5GB+ apparent size but only ~300MB actual data — without this, the copy
+	// materializes all zero regions and can exhaust RAM/disk on laptops.
+	out, err := exec.Command("cp", "--sparse=always", "--reflink=auto", src, dst).CombinedOutput()
 	if err != nil {
-		return err
-	}
-	defer srcFile.Close()
-
-	dstFile, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-
-	_, copyErr := io.Copy(dstFile, srcFile)
-	syncErr := dstFile.Sync()
-	closeErr := dstFile.Close()
-
-	if copyErr != nil {
 		os.Remove(dst)
-		return copyErr
+		return fmt.Errorf("cp: %w (%s)", err, bytes.TrimSpace(out))
 	}
-	if syncErr != nil {
-		os.Remove(dst)
-		return syncErr
-	}
-	return closeErr
+	return nil
 }

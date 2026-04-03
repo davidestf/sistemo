@@ -7,11 +7,39 @@ set -e
 mount -t proc proc /proc 2>/dev/null || true
 mount -t sysfs sysfs /sys 2>/dev/null || true
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
-mkdir -p /var/run /var/log /tmp /run/systemd
+mkdir -p /dev/pts /var/run /var/log /tmp /run/systemd
+
+# Create /dev/stdin, /dev/stdout, /dev/stderr symlinks.
+# Docker images (nginx, apache, php-fpm, etc.) symlink log files to /dev/stdout and
+# /dev/stderr for container logging. These symlinks don't exist in exported rootfs
+# because Docker injects them at runtime. Without them, services fail on boot with
+# "No such device or address". This works for ALL Docker images generically.
+ln -sf /proc/self/fd/0 /dev/stdin  2>/dev/null || true
+ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null || true
+ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null || true
+ln -sf /proc/self/fd   /dev/fd     2>/dev/null || true
 printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' > /etc/resolv.conf
 
 # Remove policy-rc.d so services auto-start on apt-get install
 rm -f /usr/sbin/policy-rc.d
+
+# Disable slow/unnecessary services for faster boot.
+# journal-flush is kept so logs persist across VM restarts.
+# e2scrub needs LVM (not available in Firecracker VMs).
+for svc in \
+  systemd-random-seed.service \
+  systemd-timesyncd.service \
+  systemd-update-utmp.service \
+  apt-daily.timer \
+  apt-daily-upgrade.timer \
+  e2scrub_all.timer \
+  e2scrub_reap.service \
+  logrotate.timer \
+  sysstat.service \
+  fstrim.timer \
+  man-db.timer; do
+  [ -d /etc/systemd/system ] && ln -sf /dev/null "/etc/systemd/system/$svc" 2>/dev/null
+done
 
 # Wait for virtio-net device (kernel ip= already configured it, just ensure it's up)
 IP=/usr/sbin/ip

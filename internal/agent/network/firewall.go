@@ -40,6 +40,14 @@ type Firewall interface {
 	// RemoveIsolation removes all isolation rules involving a bridge.
 	RemoveIsolation(bridge string) error
 
+	// EnsureSystemForward inserts accept rules for a bridge into the system's filter table
+	// (inet filter or ip filter). Required because nftables evaluates ALL forward chains
+	// independently — if the system table has policy drop, our sistemo table's accept is ignored.
+	EnsureSystemForward(bridge string) error
+
+	// RemoveSystemForward removes sistemo's compat rules for a bridge from system filter tables.
+	RemoveSystemForward(bridge string)
+
 	// BlockSMTPInNamespace blocks outbound SMTP (ports 25, 465, 587) inside a network namespace.
 	BlockSMTPInNamespace(namespace string) error
 

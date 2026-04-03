@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -29,13 +31,18 @@ type buildStatusResponse struct {
 	Message     string `json:"message"`
 	StartedAt   string `json:"started_at"`
 	ImageDigest string `json:"image_digest,omitempty"`
+	Progress    int    `json:"progress"`     // 0-100 percentage
+	ProgressMsg string `json:"progress_msg"` // current step description
 }
 
 // activeBuilds tracks running build processes for cancellation.
 var (
-	activeBuildsMu sync.Mutex
+	activeBuildsMu  sync.Mutex
 	activeBuildsMap = map[string]*exec.Cmd{} // build_id -> running cmd
 )
+
+// Default build timeout (overridden by config.BuildTimeoutMin).
+const defaultBuildTimeoutMin = 60
 
 // --- Handlers ---
 
@@ -93,15 +100,15 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 	imageName := req.Image
 
 	go func() {
-		updateBuild := func(status, message string) {
+		updateBuild := func(status, message string, progress int, progressMsg string) {
 			if h.db != nil {
 				completedAt := ""
 				if status != "building" {
 					completedAt = time.Now().UTC().Format(time.RFC3339)
 				}
-				// Only update if still in 'building' state — prevents overwriting a cancelled build
-				if _, err := h.db.Exec("UPDATE image_build SET status = ?, message = ?, completed_at = ? WHERE id = ? AND status = 'building'",
-					status, message, completedAt, buildID); err != nil {
+				if _, err := h.db.Exec(
+					"UPDATE image_build SET status = ?, message = ?, completed_at = ?, progress = ?, progress_msg = ? WHERE id = ? AND status = 'building'",
+					status, message, completedAt, progress, progressMsg, buildID); err != nil {
 					h.logger.Warn("failed to update build status", zap.String("build_id", buildID), zap.String("status", status), zap.Error(err))
 				}
 			}
@@ -111,12 +118,11 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 		sshPubKey := filepath.Join(h.cfg.DataDir, "ssh", "sistemo_key.pub")
 
 		// Use ~/.sistemo/tmp/ for builds instead of /tmp (which may be RAM-backed tmpfs).
-		// Large Docker images (3GB+) need disk-backed storage.
 		buildTmpBase := filepath.Join(h.cfg.DataDir, "tmp")
 		os.MkdirAll(buildTmpBase, 0755)
 		tmpDir, err := os.MkdirTemp(buildTmpBase, "build-*")
 		if err != nil {
-			updateBuild("error", fmt.Sprintf("create temp dir: %v", err))
+			updateBuild("error", fmt.Sprintf("create temp dir: %v", err), 0, "")
 			return
 		}
 		defer os.RemoveAll(tmpDir)
@@ -124,41 +130,39 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 		scriptPath := filepath.Join(tmpDir, "build-rootfs.sh")
 		if len(h.BuildScript) > 0 {
 			if err := os.WriteFile(scriptPath, h.BuildScript, 0755); err != nil {
-				updateBuild("error", fmt.Sprintf("write build script: %v", err))
+				updateBuild("error", fmt.Sprintf("write build script: %v", err), 0, "")
 				return
 			}
 		} else {
 			scriptPath = filepath.Join(h.cfg.DataDir, "bin", "build-rootfs.sh")
 			if !fileExists(scriptPath) {
-				updateBuild("error", "build script not found")
+				updateBuild("error", "build script not found", 0, "")
 				return
 			}
 		}
 
 		if len(h.VMInitScript) > 0 {
 			if err := os.WriteFile(filepath.Join(tmpDir, "vm-init.sh"), h.VMInitScript, 0755); err != nil {
-				updateBuild("error", fmt.Sprintf("write vm-init.sh: %v", err))
+				updateBuild("error", fmt.Sprintf("write vm-init.sh: %v", err), 0, "")
 				return
 			}
 		}
 
-		updateBuild("building", "Building rootfs from Docker image...")
-
 		cmd := exec.Command("bash", scriptPath, imageName, sshPubKey, outputPath)
 		cmd.Dir = tmpDir
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // create process group for clean kill
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 		// Determine rootfs size: user-provided or auto-detect from Docker image (min 5GB)
-		rootfsMB := 5120 // 5 GB minimum
+		rootfsMB := 5120
 		if req.SizeMB > 0 {
 			rootfsMB = req.SizeMB
 			if rootfsMB < 5120 {
 				rootfsMB = 5120
 			}
 		} else {
-			// Auto-size: check Docker image size and add 50% headroom
 			if sizeOut, err := exec.Command("docker", "image", "inspect", "--format", "{{.Size}}", imageName).Output(); err == nil {
 				if sizeBytes, err := strconv.ParseInt(strings.TrimSpace(string(sizeOut)), 10, 64); err == nil {
-					sizeMB := int(sizeBytes/(1024*1024)) * 3 / 2 // 1.5x the image size
+					sizeMB := int(sizeBytes/(1024*1024)) * 3 / 2
 					if sizeMB > rootfsMB {
 						rootfsMB = sizeMB
 					}
@@ -171,31 +175,121 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 			"SISTEMO_BUILD_TMPDIR="+buildTmpBase,
 		)
 
+		// Stream output to log file instead of capturing in memory.
+		logPath := filepath.Join(h.cfg.DataDir, "tmp", "build-"+buildID+".log")
+		logFile, err := os.Create(logPath)
+		if err != nil {
+			updateBuild("error", fmt.Sprintf("create log file: %v", err), 0, "")
+			return
+		}
+
+		// Pipe stdout/stderr through a scanner to parse PROGRESS markers,
+		// while also writing everything to the log file.
+		pr, pw := io.Pipe()
+		cmd.Stdout = pw
+		cmd.Stderr = pw
+
+		// Background goroutine: read output, parse progress, write to log file
+		outputDone := make(chan string, 1) // last N lines for error message
+		go func() {
+			defer logFile.Close()
+			scanner := bufio.NewScanner(pr)
+			scanner.Buffer(make([]byte, 64*1024), 256*1024)
+			var lastLines []string
+			for scanner.Scan() {
+				line := scanner.Text()
+				fmt.Fprintln(logFile, line)
+
+				// Parse PROGRESS:N:message markers
+				if strings.HasPrefix(line, "PROGRESS:") {
+					parts := strings.SplitN(line, ":", 3)
+					if len(parts) == 3 {
+						if pct, err := strconv.Atoi(parts[1]); err == nil {
+							updateBuild("building", "Building...", pct, parts[2])
+						}
+					}
+					continue
+				}
+
+				// Keep last 20 lines for error reporting
+				lastLines = append(lastLines, line)
+				if len(lastLines) > 20 {
+					lastLines = lastLines[1:]
+				}
+			}
+			outputDone <- strings.Join(lastLines, "\n")
+		}()
+
 		// Register process for cancellation
 		activeBuildsMu.Lock()
 		activeBuildsMap[buildID] = cmd
 		activeBuildsMu.Unlock()
 
-		output, err := cmd.CombinedOutput()
+		// Start with timeout
+		timeoutMin := defaultBuildTimeoutMin
+		if h.cfg.BuildTimeoutMin > 0 {
+			timeoutMin = h.cfg.BuildTimeoutMin
+		}
+
+		err = cmd.Start()
+		if err != nil {
+			pw.Close()
+			<-outputDone
+			updateBuild("error", fmt.Sprintf("failed to start build: %v", err), 0, "")
+			activeBuildsMu.Lock()
+			delete(activeBuildsMap, buildID)
+			activeBuildsMu.Unlock()
+			return
+		}
+
+		// Timeout watchdog — use buildDone channel so goroutines don't
+		// touch cmd.Process after Wait() has returned and reaped it.
+		buildDone := make(chan struct{})
+		timer := time.AfterFunc(time.Duration(timeoutMin)*time.Minute, func() {
+			select {
+			case <-buildDone:
+				return
+			default:
+			}
+			h.logger.Warn("build timeout reached, killing", zap.String("build_id", buildID), zap.Int("timeout_min", timeoutMin))
+			syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			time.AfterFunc(10*time.Second, func() {
+				select {
+				case <-buildDone:
+					return
+				default:
+				}
+				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			})
+		})
+
+		waitErr := cmd.Wait()
+		close(buildDone)
+		timer.Stop()
+		pw.Close()
+		lastOutput := <-outputDone
 
 		// Deregister process
 		activeBuildsMu.Lock()
 		delete(activeBuildsMap, buildID)
 		activeBuildsMu.Unlock()
 
-		if err != nil {
-			// Clean up partial/corrupt image file on failure
-			os.Remove(outputPath)
-
-			msg := string(output)
-			if len(msg) > 500 {
-				msg = msg[:500]
+		// Clean up log file after build (keep for errors)
+		defer func() {
+			if waitErr != nil {
+				// Keep log file for debugging — will be cleaned up on next build or manually
+			} else {
+				os.Remove(logPath)
 			}
-			updateBuild("error", fmt.Sprintf("build failed: %v %s", err, msg))
-		} else {
-			updateBuild("complete", fmt.Sprintf("Built %s.rootfs.ext4", buildName))
+		}()
 
-			// Register image in content-addressable store
+		if waitErr != nil {
+			os.Remove(outputPath)
+			updateBuild("error", fmt.Sprintf("build failed: %v\n%s", waitErr, lastOutput), 0, "")
+		} else {
+			updateBuild("complete", fmt.Sprintf("Built %s.rootfs.ext4", buildName), 100, "Build complete")
+
+			// Register image in content-addressable store (atomic transaction)
 			if digest, hashErr := db.HashFile(outputPath); hashErr == nil {
 				info, _ := os.Stat(outputPath)
 				now := time.Now().UTC().Format(time.RFC3339)
@@ -203,15 +297,19 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 				if info != nil {
 					sizeBytes = info.Size()
 				}
-				if _, err := h.db.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'docker_build', ?, ?, ?)",
-					digest, buildName, buildName+".rootfs.ext4", outputPath, sizeBytes, imageName, now, now); err != nil {
-					h.logger.Warn("failed to register built image", zap.String("build_id", buildID), zap.Error(err))
-				}
-				if _, err := h.db.Exec("INSERT OR IGNORE INTO image_tag (tag, digest) VALUES (?, ?)", buildName, digest); err != nil {
-					h.logger.Warn("failed to insert image tag", zap.String("build_id", buildID), zap.Error(err))
-				}
-				if _, err := h.db.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, buildID); err != nil {
-					h.logger.Warn("failed to update build digest", zap.String("build_id", buildID), zap.Error(err))
+
+				tx, txErr := h.db.Begin()
+				if txErr == nil {
+					defer tx.Rollback() // no-op after successful commit
+					tx.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'docker_build', ?, ?, ?)",
+						digest, buildName, buildName+".rootfs.ext4", outputPath, sizeBytes, imageName, now, now)
+					tx.Exec("INSERT OR REPLACE INTO image_tag (tag, digest) VALUES (?, ?)", buildName, digest)
+					tx.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, buildID)
+					if commitErr := tx.Commit(); commitErr != nil {
+						h.logger.Warn("failed to commit image registration", zap.String("build_id", buildID), zap.Error(commitErr))
+					}
+				} else {
+					h.logger.Warn("failed to begin image registration transaction", zap.String("build_id", buildID), zap.Error(txErr))
 				}
 			} else {
 				h.logger.Warn("failed to hash built image", zap.String("build_id", buildID), zap.Error(hashErr))
@@ -221,7 +319,7 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 		h.logger.Info("image build completed",
 			zap.String("image", imageName),
 			zap.String("build_id", buildID),
-			zap.Bool("success", err == nil),
+			zap.Bool("success", waitErr == nil),
 		)
 	}()
 
@@ -234,7 +332,6 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 }
 
 // ImageBuildStatus returns the status of a build.
-// Accepts both build_id and build_name for backward compat.
 // GET /api/v1/images/build/{name}/status
 func (h *DashboardAPI) ImageBuildStatus(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
@@ -248,29 +345,33 @@ func (h *DashboardAPI) ImageBuildStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Try by id first, then by build_name (backward compat)
 	var bs buildStatusResponse
+	// Try by id first, then by build_name
 	err := h.db.QueryRow(
-		"SELECT id, status, image, build_name, message, started_at, COALESCE(image_digest, '') FROM image_build WHERE id = ?",
+		"SELECT id, status, image, build_name, message, started_at, COALESCE(image_digest, ''), COALESCE(progress, 0), COALESCE(progress_msg, '') FROM image_build WHERE id = ?",
 		name,
-	).Scan(&bs.ID, &bs.Status, &bs.Image, &bs.BuildName, &bs.Message, &bs.StartedAt, &bs.ImageDigest)
+	).Scan(&bs.ID, &bs.Status, &bs.Image, &bs.BuildName, &bs.Message, &bs.StartedAt, &bs.ImageDigest, &bs.Progress, &bs.ProgressMsg)
 	if err != nil {
 		err = h.db.QueryRow(
-			"SELECT id, status, image, build_name, message, started_at, COALESCE(image_digest, '') FROM image_build WHERE build_name = ? ORDER BY started_at DESC LIMIT 1",
+			"SELECT id, status, image, build_name, message, started_at, COALESCE(image_digest, ''), COALESCE(progress, 0), COALESCE(progress_msg, '') FROM image_build WHERE build_name = ? ORDER BY started_at DESC LIMIT 1",
 			name,
-		).Scan(&bs.ID, &bs.Status, &bs.Image, &bs.BuildName, &bs.Message, &bs.StartedAt, &bs.ImageDigest)
+		).Scan(&bs.ID, &bs.Status, &bs.Image, &bs.BuildName, &bs.Message, &bs.StartedAt, &bs.ImageDigest, &bs.Progress, &bs.ProgressMsg)
 	}
 	if err != nil {
 		writeError(w, http.StatusNotFound, "no build found for this image")
 		return
 	}
 
-	// Auto-expire stale builds: if "building" for more than 10 minutes, mark as error
+	// Auto-expire stale builds
 	if bs.Status == "building" {
+		timeoutMin := defaultBuildTimeoutMin
+		if h.cfg.BuildTimeoutMin > 0 {
+			timeoutMin = h.cfg.BuildTimeoutMin
+		}
 		if started, err := time.Parse(time.RFC3339, bs.StartedAt); err == nil {
-			if time.Since(started) > 30*time.Minute {
+			if time.Since(started) > time.Duration(timeoutMin)*time.Minute {
 				bs.Status = "error"
-				bs.Message = "Build timed out (exceeded 30 minutes)"
+				bs.Message = fmt.Sprintf("Build timed out (exceeded %d minutes)", timeoutMin)
 				h.db.Exec("UPDATE image_build SET status='error', message=?, completed_at=? WHERE id=?",
 					bs.Message, time.Now().UTC().Format(time.RFC3339), bs.ID)
 			}
@@ -280,8 +381,39 @@ func (h *DashboardAPI) ImageBuildStatus(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, bs)
 }
 
-// ImageBuildCancel cancels a running build by killing the process and marking it as error.
-// Accepts both build_id and build_name for backward compat.
+// ImageBuildLogs returns the last N lines of a build's log file.
+// GET /api/v1/images/build/{id}/logs?tail=100
+func (h *DashboardAPI) ImageBuildLogs(w http.ResponseWriter, r *http.Request) {
+	buildID := chi.URLParam(r, "id")
+	if !isValidSafeID(buildID) {
+		writeError(w, http.StatusBadRequest, "invalid build identifier")
+		return
+	}
+
+	tailN := 100
+	if t := r.URL.Query().Get("tail"); t != "" {
+		if n, err := strconv.Atoi(t); err == nil && n > 0 && n <= 1000 {
+			tailN = n
+		}
+	}
+
+	logPath := filepath.Join(h.cfg.DataDir, "tmp", "build-"+buildID+".log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"lines": []string{}, "total": 0})
+		return
+	}
+
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	total := len(lines)
+	if len(lines) > tailN {
+		lines = lines[len(lines)-tailN:]
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"lines": lines, "total": total})
+}
+
+// ImageBuildCancel cancels a running build.
 // POST /api/v1/images/build/{name}/cancel
 func (h *DashboardAPI) ImageBuildCancel(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
@@ -294,7 +426,6 @@ func (h *DashboardAPI) ImageBuildCancel(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Find the active build — try by id first, then by build_name
 	var buildID string
 	err := h.db.QueryRow("SELECT id FROM image_build WHERE id = ? AND status = 'building'", name).Scan(&buildID)
 	if err != nil {
@@ -305,20 +436,25 @@ func (h *DashboardAPI) ImageBuildCancel(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Kill the process if it's still running.
-	// Hold the lock while accessing cmd.Process to avoid a TOCTOU race
-	// where the build goroutine could modify the map between lookup and kill.
+	// Kill with grace period: SIGTERM → 10s → SIGKILL
 	activeBuildsMu.Lock()
 	cmd, ok := activeBuildsMap[buildID]
 	if ok && cmd.Process != nil {
 		pid := cmd.Process.Pid
-		// Kill the entire process group (bash + docker + child processes)
-		syscall.Kill(-pid, syscall.SIGKILL)
-		h.logger.Info("killed build process group", zap.String("build_id", buildID), zap.Int("pid", pid))
+		syscall.Kill(-pid, syscall.SIGTERM)
+		h.logger.Info("sent SIGTERM to build process group", zap.String("build_id", buildID), zap.Int("pid", pid))
+		go func() {
+			time.Sleep(10 * time.Second)
+			activeBuildsMu.Lock()
+			if _, still := activeBuildsMap[buildID]; still && cmd.Process != nil {
+				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				h.logger.Info("sent SIGKILL to build process group", zap.String("build_id", buildID))
+			}
+			activeBuildsMu.Unlock()
+		}()
 	}
 	activeBuildsMu.Unlock()
 
-	// Mark as cancelled in DB
 	now := time.Now().UTC().Format(time.RFC3339)
 	h.db.Exec("UPDATE image_build SET status='error', message='Cancelled by user', completed_at=? WHERE id=? AND status='building'",
 		now, buildID)
@@ -334,7 +470,7 @@ func (h *DashboardAPI) ImageBuilds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := h.db.Query("SELECT id, status, image, build_name, message, started_at, COALESCE(image_digest, '') FROM image_build ORDER BY started_at DESC LIMIT 20")
+	rows, err := h.db.Query("SELECT id, status, image, build_name, message, started_at, COALESCE(image_digest, ''), COALESCE(progress, 0), COALESCE(progress_msg, '') FROM image_build ORDER BY started_at DESC LIMIT 50")
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"builds": []buildStatusResponse{}})
 		return
@@ -344,7 +480,7 @@ func (h *DashboardAPI) ImageBuilds(w http.ResponseWriter, r *http.Request) {
 	var builds []buildStatusResponse
 	for rows.Next() {
 		var b buildStatusResponse
-		if rows.Scan(&b.ID, &b.Status, &b.Image, &b.BuildName, &b.Message, &b.StartedAt, &b.ImageDigest) == nil {
+		if rows.Scan(&b.ID, &b.Status, &b.Image, &b.BuildName, &b.Message, &b.StartedAt, &b.ImageDigest, &b.Progress, &b.ProgressMsg) == nil {
 			builds = append(builds, b)
 		}
 	}
