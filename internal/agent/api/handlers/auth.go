@@ -4,8 +4,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -16,6 +19,96 @@ import (
 )
 
 var safeUsername = regexp.MustCompile(`^[a-zA-Z0-9_-]{3,64}$`)
+
+// loginTracker tracks failed login attempts per IP for brute-force protection.
+type loginTracker struct {
+	failures    int
+	lastFailure time.Time
+	lockedUntil time.Time
+}
+
+var (
+	loginAttemptsMu sync.Mutex
+	loginAttempts   = map[string]*loginTracker{}
+)
+
+// stripPort extracts the IP from an addr:port string.
+// RemoteAddr includes the port (e.g. "192.168.1.1:54321"), which would
+// make every connection a separate tracker — defeating rate limiting entirely.
+func stripPort(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
+}
+
+// checkLoginRateLimit returns an error if the IP is locked out.
+// Must be called BEFORE credential validation.
+func checkLoginRateLimit(ip string) error {
+	loginAttemptsMu.Lock()
+	defer loginAttemptsMu.Unlock()
+
+	tracker, exists := loginAttempts[ip]
+	if !exists {
+		return nil
+	}
+
+	if tracker.lockedUntil.IsZero() {
+		return nil
+	}
+
+	if time.Now().Before(tracker.lockedUntil) {
+		remaining := time.Until(tracker.lockedUntil).Round(time.Second)
+		return fmt.Errorf("too many failed attempts. Try again in %s", remaining)
+	}
+
+	// Lockout expired — reset tracker entirely
+	delete(loginAttempts, ip)
+	return nil
+}
+
+// recordLoginFailure increments the failure counter and applies lockout.
+func recordLoginFailure(ip string) {
+	loginAttemptsMu.Lock()
+	defer loginAttemptsMu.Unlock()
+
+	// Evict stale entries to prevent unbounded map growth (DoS vector)
+	if len(loginAttempts) > 10000 {
+		cutoff := time.Now().Add(-1 * time.Hour)
+		for k, v := range loginAttempts {
+			if v.lastFailure.Before(cutoff) {
+				delete(loginAttempts, k)
+			}
+		}
+	}
+
+	tracker, exists := loginAttempts[ip]
+	if !exists {
+		tracker = &loginTracker{}
+		loginAttempts[ip] = tracker
+	}
+
+	tracker.failures++
+	tracker.lastFailure = time.Now()
+
+	// Progressive lockout: 5 fails → 30s, 10 → 5min, 20+ → 30min
+	switch {
+	case tracker.failures >= 20:
+		tracker.lockedUntil = time.Now().Add(30 * time.Minute)
+	case tracker.failures >= 10:
+		tracker.lockedUntil = time.Now().Add(5 * time.Minute)
+	case tracker.failures >= 5:
+		tracker.lockedUntil = time.Now().Add(30 * time.Second)
+	}
+}
+
+// recordLoginSuccess resets the failure counter for an IP.
+func recordLoginSuccess(ip string) {
+	loginAttemptsMu.Lock()
+	defer loginAttemptsMu.Unlock()
+	delete(loginAttempts, ip)
+}
 
 // Auth handles dashboard authentication endpoints.
 type Auth struct {
@@ -141,6 +234,13 @@ func (h *Auth) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Brute-force protection: check if this IP is locked out
+	ip := stripPort(r.RemoteAddr)
+	if err := checkLoginRateLimit(ip); err != nil {
+		writeError(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
+
 	user, err := db.ValidateAdmin(h.db, req.Username, req.Password)
 	if err != nil {
 		h.logger.Error("validate admin failed", zap.Error(err))
@@ -149,11 +249,14 @@ func (h *Auth) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if user == nil {
+		recordLoginFailure(ip)
 		db.LogAction(h.db, "admin.login_failed", "auth", "", req.Username, "Invalid credentials", false)
-		h.logger.Warn("failed login attempt", zap.String("username", req.Username))
+		h.logger.Warn("failed login attempt", zap.String("username", req.Username), zap.String("ip", ip))
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
+
+	recordLoginSuccess(ip)
 
 	token, expiresAt, err := h.generateToken(user.Username)
 	if err != nil {

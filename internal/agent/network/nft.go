@@ -74,6 +74,12 @@ add chain inet sistemo sistemo-isolation
 }
 
 func (fw *NftFirewall) EnsureMasquerade(subnet, bridge string) error {
+	if err := validateNftInputs("", "", bridge); err != nil {
+		return err
+	}
+	if _, _, err := gonet.ParseCIDR(subnet); err != nil {
+		return fmt.Errorf("invalid subnet %q: %w", subnet, err)
+	}
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
@@ -94,6 +100,9 @@ add rule inet sistemo sistemo-postrouting ip saddr 127.0.0.0/8 oifname "%s" masq
 }
 
 func (fw *NftFirewall) RemoveMasquerade(subnet, bridge string) error {
+	if err := validateNftInputs("", "", bridge); err != nil {
+		return err
+	}
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
@@ -106,6 +115,9 @@ func (fw *NftFirewall) RemoveMasquerade(subnet, bridge string) error {
 }
 
 func (fw *NftFirewall) EnsureBridgeRules(bridge string) error {
+	if err := validateNftInputs("", "", bridge); err != nil {
+		return err
+	}
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
@@ -129,6 +141,9 @@ add rule inet sistemo sistemo-forward iifname != "%s" oifname "%s" ct state esta
 }
 
 func (fw *NftFirewall) RemoveBridgeRules(bridge string) error {
+	if err := validateNftInputs("", "", bridge); err != nil {
+		return err
+	}
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
@@ -225,6 +240,12 @@ func (fw *NftFirewall) RemoveForward(machineIP string, port int, protocol string
 }
 
 func (fw *NftFirewall) EnsureIsolation(bridgeA, bridgeB string) error {
+	if err := validateNftInputs("", "", bridgeA); err != nil {
+		return err
+	}
+	if err := validateNftInputs("", "", bridgeB); err != nil {
+		return err
+	}
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
@@ -280,11 +301,110 @@ add rule inet sistemo-smtp block-smtp tcp dport 587 drop
 	return nil
 }
 
-func (fw *NftFirewall) Cleanup() error {
+// EnsureSystemForward inserts accept rules for a sistemo bridge into the system's
+// filter table (if it exists). In nftables, multiple tables can have forward chains
+// on the same hook. If Debian/Ubuntu's default `table inet filter` has a forward chain
+// with `policy drop`, our `table inet sistemo` accept rules won't help — the system
+// table independently drops the packet. This function adds pass-through rules to the
+// system's filter table so sistemo bridge traffic is accepted there too.
+func (fw *NftFirewall) EnsureSystemForward(bridge string) error {
+	if err := validateNftInputs("", "", bridge); err != nil {
+		return err
+	}
+
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
-	// Single atomic operation removes everything.
+	// Detect system filter tables that might have a forward chain.
+	// Check both "inet filter" and "ip filter" (legacy iptables-nft).
+	// Docker/iptables-nft creates chains with UPPERCASE names (FORWARD, INPUT, etc.)
+	// while pure nftables uses lowercase. We must check both.
+	for _, family := range []string{"inet", "ip"} {
+		if !fw.tableExists(family, "filter") {
+			continue
+		}
+
+		// Find the actual forward chain name (case-sensitive in nftables).
+		// Docker/iptables-nft uses "FORWARD", pure nftables uses "forward".
+		chainName := ""
+		for _, candidate := range []string{"FORWARD", "forward"} {
+			if fw.chainExists(family, "filter", candidate) {
+				chainName = candidate
+				break
+			}
+		}
+		if chainName == "" {
+			continue
+		}
+
+		tag := fmt.Sprintf("sistemo:compat:%s:fwd", bridge)
+
+		// Check if we already added our rules
+		if fw.hasRuleInChain(family, "filter", chainName, tag) {
+			continue
+		}
+
+		fw.logger.Info("inserting sistemo forward rules into system filter table",
+			zap.String("table", family+" filter"), zap.String("chain", chainName), zap.String("bridge", bridge))
+
+		// Insert at the beginning so they're evaluated before any drop policy.
+		rules := fmt.Sprintf(`
+insert rule %s filter %s iifname "%s" accept comment "%s"
+insert rule %s filter %s oifname "%s" ct state established,related accept comment "%s"
+`, family, chainName, bridge, tag, family, chainName, bridge, tag)
+
+		if err := fw.nftApply(rules); err != nil {
+			fw.logger.Warn("failed to insert compat forward rules",
+				zap.String("table", family+" filter"), zap.String("chain", chainName), zap.Error(err))
+		}
+	}
+	return nil
+}
+
+// RemoveSystemForward removes sistemo's compat rules from system filter tables.
+func (fw *NftFirewall) RemoveSystemForward(bridge string) {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+
+	tag := fmt.Sprintf("sistemo:compat:%s:fwd", bridge)
+
+	for _, family := range []string{"inet", "ip"} {
+		if !fw.tableExists(family, "filter") {
+			continue
+		}
+		for _, chainName := range []string{"FORWARD", "forward"} {
+			if fw.chainExists(family, "filter", chainName) {
+				fw.deleteRulesInChain(family, "filter", chainName, tag)
+			}
+		}
+	}
+}
+
+// CleanupAllSystemForward removes ALL sistemo compat rules from system filter tables.
+func (fw *NftFirewall) CleanupAllSystemForward() {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+
+	for _, family := range []string{"inet", "ip"} {
+		if !fw.tableExists(family, "filter") {
+			continue
+		}
+		for _, chainName := range []string{"FORWARD", "forward"} {
+			if fw.chainExists(family, "filter", chainName) {
+				fw.deleteRulesInChainByPrefix(family, "filter", chainName, "sistemo:compat:")
+			}
+		}
+	}
+}
+
+func (fw *NftFirewall) Cleanup() error {
+	// Remove compat rules from system filter tables first.
+	fw.CleanupAllSystemForward()
+
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+
+	// Single atomic operation removes everything in our table.
 	cmd := exec.Command("nft", "delete", "table", "inet", "sistemo")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -295,6 +415,77 @@ func (fw *NftFirewall) Cleanup() error {
 		return fmt.Errorf("nft cleanup: %s", string(out))
 	}
 	return nil
+}
+
+// --- System table helpers ---
+
+// tableExists checks if a given nftables table exists.
+func (fw *NftFirewall) tableExists(family, table string) bool {
+	cmd := exec.Command("nft", "list", "table", family, table)
+	return cmd.Run() == nil
+}
+
+// chainExists checks if a chain exists within a table.
+func (fw *NftFirewall) chainExists(family, table, chain string) bool {
+	cmd := exec.Command("nft", "list", "chain", family, table, chain)
+	return cmd.Run() == nil
+}
+
+// hasRuleInChain checks if a rule with the given comment exists in an arbitrary chain.
+func (fw *NftFirewall) hasRuleInChain(family, table, chain, comment string) bool {
+	cmd := exec.Command("nft", "-j", "list", "chain", family, table, chain)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	rules, err := parseNftJSON(out)
+	if err != nil {
+		return false
+	}
+	for _, r := range rules {
+		if r.Comment == comment {
+			return true
+		}
+	}
+	return false
+}
+
+// deleteRulesInChain deletes rules with exact comment from an arbitrary chain.
+func (fw *NftFirewall) deleteRulesInChain(family, table, chain, comment string) {
+	cmd := exec.Command("nft", "-j", "list", "chain", family, table, chain)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return
+	}
+	rules, err := parseNftJSON(out)
+	if err != nil {
+		return
+	}
+	for _, r := range rules {
+		if r.Comment == comment {
+			delCmd := exec.Command("nft", "delete", "rule", family, table, chain, "handle", fmt.Sprintf("%d", r.Handle))
+			delCmd.CombinedOutput()
+		}
+	}
+}
+
+// deleteRulesInChainByPrefix deletes rules whose comment starts with prefix from an arbitrary chain.
+func (fw *NftFirewall) deleteRulesInChainByPrefix(family, table, chain, prefix string) {
+	cmd := exec.Command("nft", "-j", "list", "chain", family, table, chain)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return
+	}
+	rules, err := parseNftJSON(out)
+	if err != nil {
+		return
+	}
+	for _, r := range rules {
+		if strings.HasPrefix(r.Comment, prefix) {
+			delCmd := exec.Command("nft", "delete", "rule", family, table, chain, "handle", fmt.Sprintf("%d", r.Handle))
+			delCmd.CombinedOutput()
+		}
+	}
 }
 
 // --- Internal helpers ---

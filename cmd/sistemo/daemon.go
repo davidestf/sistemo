@@ -109,6 +109,11 @@ func findKernelInDir(dir string) string {
 }
 
 func runDaemon(logger *zap.Logger, dataDir string) error {
+	// NOTE: Do NOT unshare the daemon's mount namespace. Making it private
+	// breaks `ip netns add` which needs mount propagation for bind-mounting
+	// network namespace files. Build scripts isolate their own mounts via
+	// `unshare --mount --propagation private` in build-rootfs.sh.
+
 	dataDir = getDataDir(dataDir)
 	if syscall.Geteuid() == 0 && os.Getenv("SUDO_USER") != "" {
 		rootSistemo := filepath.Join("/root", ".sistemo")

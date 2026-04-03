@@ -108,6 +108,14 @@ func (n *VMNetwork) removeNamespaceAndVeth() {
 func (n *VMNetwork) Create() error {
 	log := n.logger()
 
+	// --- Pre-cleanup: remove any stale veth devices from a previous run ---
+	// On restart, the namespace may have been deleted (releasing veth-in) but the
+	// host-side veth-out can linger if cleanup was incomplete or interrupted.
+	if _, err := os.Stat("/sys/class/net/" + n.VethOut); err == nil {
+		log.Info("removing stale host veth before create", zap.String("veth", n.VethOut))
+		run("ip", "link", "delete", n.VethOut)
+	}
+
 	// --- Create namespace ---
 	if rc, out, _ := run("ip", "netns", "add", n.NamespaceName); rc != 0 {
 		if strings.Contains(out, "File exists") {

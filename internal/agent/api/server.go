@@ -147,6 +147,7 @@ func NewRouter(cfg *config.Config, mgr *machine.Manager, logger *zap.Logger, db 
 		r.Delete("/images/{name}", dashAPI.ImageDelete)
 		r.Post("/images/build", dashAPI.ImageBuild)
 		r.Get("/images/build/{name}/status", dashAPI.ImageBuildStatus)
+		r.Get("/images/build/{id}/logs", dashAPI.ImageBuildLogs)
 		r.Post("/images/build/{name}/cancel", dashAPI.ImageBuildCancel)
 		r.Get("/images/builds", dashAPI.ImageBuilds)
 
