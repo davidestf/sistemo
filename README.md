@@ -29,29 +29,29 @@
 ```bash
 curl -sSL https://get.sistemo.io | sh
 sudo sistemo up
-sistemo vm deploy debian
-sistemo vm ssh debian
+sistemo machine deploy debian      # or: sistemo vm deploy debian
+sistemo machine ssh debian
 ```
 
-That's it. Real Debian VM, SSH access, full `apt` + `systemctl`. Running on your hardware via [Firecracker](https://firecracker-microvm.github.io/) microVMs.
+That's it. Real Debian machine, SSH access, full `apt` + `systemctl`. Running on your hardware via [Firecracker](https://firecracker-microvm.github.io/) microVMs.
 
 ## What you can do
 
 ```bash
 # Deploy from the registry (debian, ubuntu, almalinux)
-sistemo vm deploy debian
-sistemo vm deploy ubuntu --name dev --vcpus 4 --memory 2G
+sistemo machine deploy debian
+sistemo machine deploy ubuntu --name dev --vcpus 4 --memory 2G
 
 # Boot from an existing volume (skip image entirely)
-sistemo vm deploy --volume web-root --name web2
+sistemo machine deploy --volume web-root --name web2
 
 # Build from any Docker image (openssh-server auto-installed)
 sudo sistemo image build node:20
-sistemo vm deploy node --name api
+sistemo machine deploy node --name api
 
 # Deploy from a URL or local file
-sistemo vm deploy https://example.com/custom.rootfs.ext4
-sistemo vm deploy ./my-image.rootfs.ext4
+sistemo machine deploy https://example.com/custom.rootfs.ext4
+sistemo machine deploy ./my-image.rootfs.ext4
 ```
 
 Images are cached locally in `~/.sistemo/images/` — first deploy downloads, every deploy after is instant.
@@ -60,29 +60,29 @@ Images are cached locally in `~/.sistemo/images/` — first deploy downloads, ev
 
 ```bash
 # Expose nginx to your network
-sistemo vm deploy debian --name web --expose 80
-sistemo vm ssh web
+sistemo machine deploy debian --name web --expose 80
+sistemo machine ssh web
 apt install -y nginx && systemctl start nginx
 # http://your-machine:80 is live
 
 # Isolated network: app + database talk to each other, nothing else can reach them
 sistemo network create production
-sistemo vm deploy debian --name app --network production --expose 3000
-sistemo vm deploy debian --name postgres --network production
+sistemo machine deploy debian --name app --network production --expose 3000
+sistemo machine deploy debian --name postgres --network production
 
-# Persistent storage that survives VM delete
+# Persistent storage that survives machine delete
 sistemo volume create 5G --name pgdata
-sistemo vm deploy debian --name db --attach=pgdata
+sistemo machine deploy debian --name db --attach=pgdata
 
 # Resize a volume
 sistemo volume resize mydata 10GB
 
-# Attach/detach volumes on a stopped VM
-sistemo vm volume attach myvm mydata
-sistemo vm volume detach myvm mydata
+# Attach/detach volumes on a stopped machine
+sistemo machine volume attach myvm mydata
+sistemo machine volume detach myvm mydata
 
-# Delete a VM but keep its root volume
-sistemo vm delete myvm --preserve-storage
+# Delete a machine but keep its root volume
+sistemo machine delete myvm --preserve-storage
 
 # Diagnose your setup
 sudo sistemo doctor
@@ -91,30 +91,31 @@ sudo sistemo doctor
 ## Features
 
 - **One binary** -- CLI + daemon, ~15 MB, zero dependencies beyond Linux + KVM
-- **SSH + browser terminal** -- `sistemo vm ssh` or open `http://localhost:7777/dashboard` in your browser
-- **Named networks** -- Isolated VM groups with `--network production`
+- **SSH + browser terminal** -- `sistemo machine ssh` or open `http://localhost:7777/dashboard/` in your browser
+- **Named networks** -- Isolated machine groups with `--network production`
 - **Port expose** -- `--expose 80` or `--expose 8080:3000`
 - **Custom images** -- Build from any Docker image: `sistemo image build nginx:latest`
-- **Persistent volumes** -- Create, resize, attach/detach; every VM's rootfs is also tracked as a volume
+- **Persistent volumes** -- Create, resize, attach/detach; every machine's rootfs is also tracked as a volume
 - **Systemd service** -- `sistemo service install` survives reboots
 - **Health check** -- `sistemo doctor` diagnoses your entire setup
 - **Audit log** -- `sistemo history` shows every operation
-- **JSON output** -- `sistemo vm list -o json` for scripting and automation
+- **JSON output** -- `sistemo machine list -o json` for scripting and automation
+- **vm alias** -- `sistemo vm` works everywhere `sistemo machine` does
 - **Command aliases** -- `ls` for list, `rm` for delete, `show` for status
 - **Shell completions** -- `sistemo completion bash|zsh|fish`
 - **Config validation** -- Bad config? Clear error with fix suggestion
 - **x86_64 + ARM64** -- Intel, AMD, Raspberry Pi 5, Hetzner CAX, Graviton
-- **Security** -- Seccomp syscall filtering, per-VM cgroup limits, network namespace isolation
+- **Security** -- nftables firewall, seccomp syscall filtering, per-machine cgroup limits, network namespace isolation
 
 ## Web Dashboard
 
 Open `http://localhost:7777/dashboard/` after starting the daemon.
 
-![Sistemo Dashboard — Virtual Machines](https://sistemo.io/blog/v060/dashboard-vms.png)
+![Sistemo Dashboard — Machines](https://sistemo.io/blog/v060/dashboard-vms.png)
 
-- **Deploy VMs** from registry, Docker images, or URLs — all from the browser
+- **Deploy machines** from registry, Docker images, or URLs — all from the browser
 - **Terminal** — full xterm.js SSH terminal embedded in the dashboard
-- **Manage everything** — VMs, images, volumes, networks, ports
+- **Manage everything** — machines, images, volumes, networks, ports
 - **Build Docker images** — type `nginx:latest`, click Build & Deploy
 - **Activity history** — full audit log with filters
 - **System health** — host CPU, RAM, disk, Firecracker status
@@ -151,54 +152,58 @@ sistemo install
 ## Commands
 
 ```
-sistemo up                                Start the daemon
-sistemo doctor                            Check installation health
-sistemo history                           Show operation history
+sistemo up                                    Start the daemon
+sistemo doctor                                Check installation health
+sistemo history                               Show operation history
 
-sistemo vm deploy <image> [flags]         Create a VM
-  --name NAME                               VM name
-  --vcpus N  --memory SIZE  --storage SIZE  Resources
-  --expose PORT                             Expose port (host:vm or just port)
-  --network NAME                            Join a named network
-  --attach VOLUME                           Attach persistent volume
-  --volume VOLUME                           Boot from an existing volume
-sistemo vm list                           List VMs
-sistemo vm list -o json                   JSON output for scripting
-sistemo vm ssh <name>                     SSH into a VM
-sistemo vm exec <name> <command>          Run a command
-sistemo vm restart|stop|start <name>      Lifecycle
-sistemo vm delete <name>                  Remove a VM
-sistemo vm delete <name> -y               Skip confirmation prompt
-  --preserve-storage                        Keep root volume on delete
-sistemo vm status <name>                  Show details
-sistemo vm expose <name> --port P         Expose port at runtime
-sistemo vm unexpose <name> --port P       Remove port expose
-sistemo vm volume attach <vm> <volume>    Attach volume to stopped VM
-sistemo vm volume detach <vm> <volume>    Detach volume from stopped VM
+# "machine" is the canonical command, "vm" is a permanent alias.
+# Both work identically: sistemo machine deploy = sistemo vm deploy
 
-sistemo network create <name>             Create isolated network
-sistemo network list                      List networks
-sistemo network delete <name>             Delete network
+sistemo machine deploy <image> [flags]        Create a machine
+  --name NAME                                   Machine name
+  --vcpus N  --memory SIZE  --storage SIZE      Resources
+  --expose PORT                                 Expose port (host:machine or just port)
+  --network NAME                                Join a named network
+  --attach VOLUME                               Attach persistent volume
+  --volume VOLUME                               Boot from an existing volume
+sistemo machine list                          List machines
+sistemo machine list -o json                  JSON output for scripting
+sistemo machine ssh <name>                    SSH into a machine
+sistemo machine exec <name> <command>         Run a command
+sistemo machine restart|stop|start <name>     Lifecycle
+sistemo machine delete <name>                 Remove a machine
+sistemo machine delete <name> -y              Skip confirmation prompt
+  --preserve-storage                            Keep root volume on delete
+sistemo machine status <name>                 Show details
+sistemo machine expose <name> --port P        Expose port at runtime
+sistemo machine unexpose <name> --port P      Remove port expose
+sistemo machine volume attach <m> <volume>    Attach volume to stopped machine
+sistemo machine volume detach <m> <volume>    Detach volume from stopped machine
 
-sistemo volume create <size> [--name=N]   Create persistent volume
-sistemo volume list                       List volumes
-sistemo volume delete <name>              Delete a volume
-sistemo volume resize <name> <size>       Resize a volume
-sistemo image build <docker-image>        Build rootfs from Docker
-sistemo image list                        List available images
-sistemo service install                   Run as systemd service
-sistemo admin reset-password             Reset dashboard admin password
-sistemo config                            Show configuration
-sistemo completion bash|zsh|fish          Shell completions
+sistemo network create <name>                 Create isolated network
+sistemo network list                          List networks
+sistemo network delete <name>                 Delete network
 
-# Aliases: ls=list, rm=delete, show=status
-sistemo vm ls                             # alias for list
-sistemo vm rm <name> -y                   # alias for delete, skip confirm
-sistemo vm show <name>                    # alias for status
+sistemo volume create <size> [--name=N]       Create persistent volume
+sistemo volume list                           List volumes
+sistemo volume delete <name>                  Delete a volume
+sistemo volume resize <name> <size>           Resize a volume
+sistemo image build <docker-image>            Build rootfs from Docker
+sistemo image list                            List available images
+sistemo service install                       Run as systemd service
+sistemo admin reset-password                  Reset dashboard admin password
+sistemo config                                Show configuration
+sistemo completion bash|zsh|fish              Shell completions
+
+# Aliases: ls=list, rm=delete, show=status, vm=machine
+sistemo vm deploy debian                      # same as sistemo machine deploy
+sistemo machine ls                            # alias for list
+sistemo machine rm <name> -y                  # alias for delete, skip confirm
+sistemo machine show <name>                   # alias for status
 
 # Global flags
---output json / -o json                   # JSON output (works on list/status)
---yes / -y                                # Skip confirmation prompts
+--output json / -o json                       # JSON output (works on list/status)
+--yes / -y                                    # Skip confirmation prompts
 ```
 
 ## Configuration

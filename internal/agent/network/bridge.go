@@ -5,6 +5,7 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"go.uber.org/zap"
 )
@@ -30,6 +31,21 @@ var (
 	BridgeNetmask = "16"
 	bridgeIPNet   *net.IPNet
 )
+
+// Package-level firewall instance, lazily initialized.
+var (
+	fw     Firewall
+	fwOnce sync.Once
+	fwErr  error
+)
+
+// GetFirewall returns the package-level firewall instance, initializing it on first call.
+func GetFirewall(logger *zap.Logger) (Firewall, error) {
+	fwOnce.Do(func() {
+		fw, fwErr = NewNftFirewall(logger)
+	})
+	return fw, fwErr
+}
 
 // ParseBridgeSubnet parses a CIDR like "10.200.0.0/16" and sets the bridge globals.
 // Gateway IP is .1 in the subnet. Must be called before EnsureBridge.
@@ -58,11 +74,17 @@ func ParseBridgeSubnet(cidr string) error {
 // EnsureBridge creates the sistemo0 bridge if it doesn't exist, assigns an IP,
 // and sets up NAT for outbound internet access from VMs.
 func EnsureBridge(_ string, logger *zap.Logger) error {
-	// Check required binaries before doing anything
-	for _, bin := range []string{"iptables", "ip", "sysctl"} {
+	// Check required binaries
+	for _, bin := range []string{"nft", "ip", "sysctl"} {
 		if _, err := exec.LookPath(bin); err != nil {
-			return fmt.Errorf("%s not found — install it (e.g. apt install iptables iproute2 procps)", bin)
+			return fmt.Errorf("%s not found — install it (e.g. apt install nftables iproute2 procps)", bin)
 		}
+	}
+
+	// Initialize firewall
+	firewall, err := GetFirewall(logger)
+	if err != nil {
+		return err
 	}
 
 	// Create bridge if not exists
@@ -99,36 +121,15 @@ func EnsureBridge(_ string, logger *zap.Logger) error {
 		return fmt.Errorf("enable route_localnet on %s: %s", BridgeName, out)
 	}
 
-	// MASQUERADE: VMs → internet. Use "! -o sistemo0" so the rule survives
-	// WiFi reconnects and interface name changes.
-	rc, _, _ = run("iptables", "-t", "nat", "-C", "POSTROUTING", "-s", BridgeCIDR, "!", "-o", BridgeName, "-j", "MASQUERADE")
-	if rc != 0 {
-		if rc, out, _ := run("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", BridgeCIDR, "!", "-o", BridgeName, "-j", "MASQUERADE"); rc != 0 {
-			return fmt.Errorf("bridge MASQUERADE rule: %s", out)
-		}
-	}
-	// MASQUERADE: localhost → VM. Rewrite source from 127.0.0.1 to bridge IP.
-	rc, _, _ = run("iptables", "-t", "nat", "-C", "POSTROUTING", "-s", "127.0.0.0/8", "-o", BridgeName, "-j", "MASQUERADE")
-	if rc != 0 {
-		run("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", "127.0.0.0/8", "-o", BridgeName, "-j", "MASQUERADE")
+	// MASQUERADE: VMs → internet + localhost → VM
+	if err := firewall.EnsureMasquerade(BridgeCIDR, BridgeName); err != nil {
+		return fmt.Errorf("bridge masquerade: %w", err)
 	}
 
-	// FORWARD: allow bridge traffic out and return traffic back
-	rc, _, _ = run("iptables", "-C", "FORWARD", "-i", BridgeName, "!", "-o", BridgeName, "-j", "ACCEPT")
-	if rc != 0 {
-		run("iptables", "-I", "FORWARD", "1", "-i", BridgeName, "!", "-o", BridgeName, "-j", "ACCEPT")
-		run("iptables", "-I", "FORWARD", "1", "!", "-i", BridgeName, "-o", BridgeName, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+	// FORWARD: bridge traffic rules
+	if err := firewall.EnsureBridgeRules(BridgeName); err != nil {
+		return fmt.Errorf("bridge forward rules: %w", err)
 	}
-
-	// FORWARD: allow VM-to-VM traffic on the bridge
-	rc, _, _ = run("iptables", "-C", "FORWARD", "-i", BridgeName, "-o", BridgeName, "-j", "ACCEPT")
-	if rc != 0 {
-		run("iptables", "-I", "FORWARD", "1", "-i", BridgeName, "-o", BridgeName, "-j", "ACCEPT")
-	}
-
-	// Ensure isolation chain exists and is at position 1 in FORWARD.
-	// Named bridges add their isolation rules here; the default bridge just ensures the chain.
-	ensureIsolationChain()
 
 	logger.Info("bridge ready",
 		zap.String("bridge", BridgeName),
@@ -143,6 +144,11 @@ func CreateNamedBridge(bridgeName, cidr string, logger *zap.Logger) error {
 	_, ipNet, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return fmt.Errorf("invalid subnet %q: %w", cidr, err)
+	}
+
+	firewall, err := GetFirewall(logger)
+	if err != nil {
+		return err
 	}
 
 	// Gateway = network address + 1 (using 32-bit math for correctness with any CIDR)
@@ -178,42 +184,25 @@ func CreateNamedBridge(bridgeName, cidr string, logger *zap.Logger) error {
 	// Enable route_localnet so localhost DNAT works for port forwarding.
 	run("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.route_localnet=1", bridgeName))
 
-	// MASQUERADE for outbound
-	rc, _, _ = run("iptables", "-t", "nat", "-C", "POSTROUTING", "-s", cidr, "!", "-o", bridgeName, "-j", "MASQUERADE")
-	if rc != 0 {
-		run("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", cidr, "!", "-o", bridgeName, "-j", "MASQUERADE")
-	}
-	// MASQUERADE: localhost → VM. Rewrite source from 127.0.0.1 to bridge IP
-	// so the VM can reply back to the host instead of its own loopback.
-	rc, _, _ = run("iptables", "-t", "nat", "-C", "POSTROUTING", "-s", "127.0.0.0/8", "-o", bridgeName, "-j", "MASQUERADE")
-	if rc != 0 {
-		run("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", "127.0.0.0/8", "-o", bridgeName, "-j", "MASQUERADE")
+	// MASQUERADE for outbound + localhost
+	if err := firewall.EnsureMasquerade(cidr, bridgeName); err != nil {
+		return fmt.Errorf("named bridge masquerade: %w", err)
 	}
 
-	// FORWARD: allow same-bridge traffic (VM-to-VM within this network)
-	rc, _, _ = run("iptables", "-C", "FORWARD", "-i", bridgeName, "-o", bridgeName, "-j", "ACCEPT")
-	if rc != 0 {
-		run("iptables", "-I", "FORWARD", "1", "-i", bridgeName, "-o", bridgeName, "-j", "ACCEPT")
-	}
-
-	// FORWARD: allow outbound to internet and return traffic (but NOT to other bridges — isolation rules below handle that)
-	rc, _, _ = run("iptables", "-C", "FORWARD", "-i", bridgeName, "!", "-o", bridgeName, "-j", "ACCEPT")
-	if rc != 0 {
-		run("iptables", "-I", "FORWARD", "1", "-i", bridgeName, "!", "-o", bridgeName, "-j", "ACCEPT")
-		run("iptables", "-I", "FORWARD", "1", "!", "-i", bridgeName, "-o", bridgeName, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+	// FORWARD rules for this bridge
+	if err := firewall.EnsureBridgeRules(bridgeName); err != nil {
+		return fmt.Errorf("named bridge forward rules: %w", err)
 	}
 
 	// ISOLATION: block traffic between this bridge and all other sistemo-managed bridges.
-	// This must be BEFORE the ACCEPT rules (higher priority = lower rule number).
-	ensureIsolationChain()
-
-	// Block traffic from this bridge to the default bridge and vice versa
-	addIsolationRule(bridgeName, BridgeName)
-
-	// Block traffic from this bridge to all other named bridges
+	if err := firewall.EnsureIsolation(bridgeName, BridgeName); err != nil {
+		return fmt.Errorf("bridge isolation: %w", err)
+	}
 	for _, other := range ListNamedBridges() {
 		if other != bridgeName {
-			addIsolationRule(bridgeName, other)
+			if err := firewall.EnsureIsolation(bridgeName, other); err != nil {
+				return fmt.Errorf("bridge isolation %s<->%s: %w", bridgeName, other, err)
+			}
 		}
 	}
 
@@ -224,67 +213,20 @@ func CreateNamedBridge(bridgeName, cidr string, logger *zap.Logger) error {
 	return nil
 }
 
-// ensureIsolationChain creates the SISTEMO-ISOLATION chain and ensures it's at position 1 in FORWARD.
-// This chain contains DROP rules between bridges to enforce network isolation.
-func ensureIsolationChain() {
-	// Create chain (ignore error if already exists)
-	run("iptables", "-N", "SISTEMO-ISOLATION")
-
-	// Check if the chain jump already exists in FORWARD
-	rc, _, _ := run("iptables", "-C", "FORWARD", "-j", "SISTEMO-ISOLATION")
-	if rc != 0 {
-		// Not present at all — insert at position 1
-		run("iptables", "-I", "FORWARD", "1", "-j", "SISTEMO-ISOLATION")
+// DeleteNamedBridge removes a named bridge and its rules.
+func DeleteNamedBridge(bridgeName string, logger *zap.Logger) {
+	firewall, err := GetFirewall(logger)
+	if err != nil {
+		logger.Warn("cannot get firewall for cleanup", zap.Error(err))
 		return
 	}
 
-	// Already present — check if it's at position 1 by reading rule 1
-	rc, out, _ := run("iptables", "-L", "FORWARD", "1", "-n")
-	if rc == 0 && strings.Contains(out, "SISTEMO-ISOLATION") {
-		return // already at position 1
+	// Remove isolation rules first
+	if err := firewall.RemoveIsolation(bridgeName); err != nil {
+		logger.Warn("remove isolation rules", zap.Error(err))
 	}
-
-	// Move to position 1
-	run("iptables", "-D", "FORWARD", "-j", "SISTEMO-ISOLATION")
-	run("iptables", "-I", "FORWARD", "1", "-j", "SISTEMO-ISOLATION")
-}
-
-// addIsolationRule adds bidirectional DROP rules between two bridges.
-func addIsolationRule(bridgeA, bridgeB string) {
-	// A → B
-	rc, _, _ := run("iptables", "-C", "SISTEMO-ISOLATION", "-i", bridgeA, "-o", bridgeB, "-j", "DROP")
-	if rc != 0 {
-		run("iptables", "-A", "SISTEMO-ISOLATION", "-i", bridgeA, "-o", bridgeB, "-j", "DROP")
-	}
-	// B → A
-	rc, _, _ = run("iptables", "-C", "SISTEMO-ISOLATION", "-i", bridgeB, "-o", bridgeA, "-j", "DROP")
-	if rc != 0 {
-		run("iptables", "-A", "SISTEMO-ISOLATION", "-i", bridgeB, "-o", bridgeA, "-j", "DROP")
-	}
-}
-
-// removeIsolationRules removes all isolation rules involving a bridge.
-func removeIsolationRules(bridgeName string) {
-	// Remove all rules in SISTEMO-ISOLATION that mention this bridge
-	// Try removing rules involving this bridge with sistemo0 and all named bridges
-	run("iptables", "-D", "SISTEMO-ISOLATION", "-i", bridgeName, "-o", BridgeName, "-j", "DROP")
-	run("iptables", "-D", "SISTEMO-ISOLATION", "-i", BridgeName, "-o", bridgeName, "-j", "DROP")
-	for _, other := range ListNamedBridges() {
-		if other != bridgeName {
-			run("iptables", "-D", "SISTEMO-ISOLATION", "-i", bridgeName, "-o", other, "-j", "DROP")
-			run("iptables", "-D", "SISTEMO-ISOLATION", "-i", other, "-o", bridgeName, "-j", "DROP")
-		}
-	}
-}
-
-// DeleteNamedBridge removes a named bridge and its rules.
-func DeleteNamedBridge(bridgeName string, logger *zap.Logger) {
-	// Remove isolation rules first (before bridge disappears from ListNamedBridges)
-	removeIsolationRules(bridgeName)
 
 	// Get subnet from bridge IP to remove MASQUERADE rule.
-	// ip addr show returns "10.201.0.1/24" (gateway+prefix), but the MASQUERADE rule
-	// was created with the network CIDR "10.201.0.0/24". Convert to network form.
 	rc, out, _ := run("ip", "addr", "show", bridgeName)
 	if rc == 0 {
 		for _, line := range strings.Split(out, "\n") {
@@ -296,16 +238,19 @@ func DeleteNamedBridge(bridgeName string, logger *zap.Logger) {
 					if err != nil {
 						continue
 					}
-					networkCIDR := ipNet.String() // canonical network form
-					run("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", networkCIDR, "!", "-o", bridgeName, "-j", "MASQUERADE")
+					networkCIDR := ipNet.String()
+					if err := firewall.RemoveMasquerade(networkCIDR, bridgeName); err != nil {
+						logger.Warn("remove masquerade", zap.Error(err))
+					}
 				}
 			}
 		}
 	}
-	run("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", "127.0.0.0/8", "-o", bridgeName, "-j", "MASQUERADE")
-	run("iptables", "-D", "FORWARD", "-i", bridgeName, "!", "-o", bridgeName, "-j", "ACCEPT")
-	run("iptables", "-D", "FORWARD", "!", "-i", bridgeName, "-o", bridgeName, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
-	run("iptables", "-D", "FORWARD", "-i", bridgeName, "-o", bridgeName, "-j", "ACCEPT")
+
+	if err := firewall.RemoveBridgeRules(bridgeName); err != nil {
+		logger.Warn("remove bridge rules", zap.Error(err))
+	}
+
 	run("ip", "link", "set", bridgeName, "down")
 	run("ip", "link", "delete", bridgeName)
 	logger.Info("named bridge removed", zap.String("bridge", bridgeName))
@@ -333,13 +278,14 @@ func ListNamedBridges() []string {
 	return bridges
 }
 
-// CleanupBridge removes the sistemo0 bridge and its NAT rules.
+// CleanupBridge removes the sistemo0 bridge and all sistemo nftables rules.
 func CleanupBridge(hostInterface string, logger *zap.Logger) {
-	run("iptables", "-D", "FORWARD", "-i", BridgeName, "!", "-o", BridgeName, "-j", "ACCEPT")
-	run("iptables", "-D", "FORWARD", "!", "-i", BridgeName, "-o", BridgeName, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
-	run("iptables", "-D", "FORWARD", "-i", BridgeName, "-o", BridgeName, "-j", "ACCEPT")
-	run("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", BridgeCIDR, "!", "-o", BridgeName, "-j", "MASQUERADE")
-	run("iptables", "-t", "nat", "-D", "POSTROUTING", "-s", "127.0.0.0/8", "-o", BridgeName, "-j", "MASQUERADE")
+	firewall, err := GetFirewall(logger)
+	if err == nil {
+		if cleanErr := firewall.Cleanup(); cleanErr != nil {
+			logger.Warn("nft cleanup", zap.Error(cleanErr))
+		}
+	}
 	run("ip", "link", "set", BridgeName, "down")
 	run("ip", "link", "delete", BridgeName)
 	logger.Info("bridge removed", zap.String("bridge", BridgeName))

@@ -20,7 +20,7 @@ func TestNewCreatesDB(t *testing.T) {
 	}
 }
 
-func TestMigrationCreatesVMTable(t *testing.T) {
+func TestMigrationCreatesMachineTable(t *testing.T) {
 	dir := t.TempDir()
 	database, err := New(dir)
 	if err != nil {
@@ -30,8 +30,8 @@ func TestMigrationCreatesVMTable(t *testing.T) {
 
 	// Insert a row
 	_, err = database.Exec(
-		`INSERT INTO vm (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
-		 VALUES ('test-id', 'test-vm', 'running', 'debian', 2, 512, 2048, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		`INSERT INTO machine (id, name, status, image, vcpus, memory_mb, storage_mb, created_at, last_state_change)
+		 VALUES ('test-id', 'test-machine', 'running', 'debian', 2, 512, 2048, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
 	)
 	if err != nil {
 		t.Fatalf("INSERT failed: %v", err)
@@ -39,12 +39,12 @@ func TestMigrationCreatesVMTable(t *testing.T) {
 
 	// Read it back
 	var name, status string
-	err = database.QueryRow("SELECT name, status FROM vm WHERE id = 'test-id'").Scan(&name, &status)
+	err = database.QueryRow("SELECT name, status FROM machine WHERE id = 'test-id'").Scan(&name, &status)
 	if err != nil {
 		t.Fatalf("SELECT failed: %v", err)
 	}
-	if name != "test-vm" || status != "running" {
-		t.Errorf("got name=%q status=%q, want test-vm running", name, status)
+	if name != "test-machine" || status != "running" {
+		t.Errorf("got name=%q status=%q, want test-machine running", name, status)
 	}
 }
 

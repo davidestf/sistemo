@@ -342,7 +342,7 @@ func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memory
 	}
 
 	logger.Info("sending create VM request", zap.Int("vcpus", vcpus), zap.Int("memory_mb", memoryMB), zap.Int("storage_mb", storageMB))
-	req := &daemon.CreateVMRequest{
+	req := &daemon.CreateMachineRequest{
 		Name:            name,
 		Image:           image,
 		VCPUs:           vcpus,
@@ -354,7 +354,7 @@ func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memory
 		NetworkBridge:   networkBridge,
 		NetworkSubnet:   networkSubnet,
 	}
-	resp, err := daemon.CreateVM(baseURL, req)
+	resp, err := daemon.CreateMachine(baseURL, req)
 	if err != nil {
 		errStr := err.Error()
 		if strings.Contains(errStr, "already exists") {
@@ -375,15 +375,15 @@ func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memory
 	}
 	// Store network association
 	if networkID != "" && database != nil {
-		db.SafeExec(database, "UPDATE vm SET network_id = ? WHERE id = ?", networkID, resp.VMID)
+		db.SafeExec(database, "UPDATE machine SET network_id = ? WHERE id = ?", networkID, resp.MachineID)
 	}
 
-	fmt.Printf("Deployed %q as %s (%s)\n", image, name, resp.VMID)
+	fmt.Printf("Deployed %q as %s (%s)\n", image, name, resp.MachineID)
 	fmt.Printf("  IP: %s  Namespace: %s  Boot: %dms\n", resp.IPAddress, resp.Namespace, resp.BootTimeMS)
 	if networkName != "" {
 		fmt.Printf("  Network: %s\n", networkName)
 	}
-	fmt.Printf("  Dashboard: %s/dashboard/#/vms/%s\n", baseURL, resp.VMID)
+	fmt.Printf("  Dashboard: %s/dashboard/#/machines/%s\n", baseURL, resp.MachineID)
 
 	// Expose ports if requested
 	for _, portSpec := range exposePorts {
@@ -392,7 +392,7 @@ func runDeploy(logger *zap.Logger, database *sql.DB, image string, vcpus, memory
 			fmt.Fprintf(os.Stderr, "  Warning: invalid port spec %q: %v\n", portSpec, err)
 			continue
 		}
-		if err := daemon.ExposePort(baseURL, resp.VMID, hostPort, vmPort, "tcp"); err != nil {
+		if err := daemon.ExposePort(baseURL, resp.MachineID, hostPort, vmPort, "tcp"); err != nil {
 			fmt.Fprintf(os.Stderr, "  Warning: expose port %d: %v\n", hostPort, err)
 			continue
 		}

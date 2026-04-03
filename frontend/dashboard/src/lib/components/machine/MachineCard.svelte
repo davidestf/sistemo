@@ -1,24 +1,24 @@
 <script lang="ts">
-  import type { VM } from '../../api/types';
+  import type { Machine } from '../../api/types';
   import { post, del } from '../../api/client';
   import { imageName } from '../../utils/format';
   import { addToast } from '../../stores/toast.svelte';
-  import VMStatusDot from './VMStatusDot.svelte';
+  import MachineStatusDot from './MachineStatusDot.svelte';
   import Button from '../ui/Button.svelte';
 
-  let { vm, onrefresh }: { vm: VM; onrefresh?: () => void } = $props();
+  let { machine, onrefresh }: { machine: Machine; onrefresh?: () => void } = $props();
 
-  const isRunning = $derived(vm.status === 'running');
+  const isRunning = $derived(machine.status === 'running');
 
   function navigate() {
-    window.location.hash = `/vms/${vm.id}`;
+    window.location.hash = `/machines/${machine.id}`;
   }
 
   async function handleStop(e: MouseEvent) {
     e.stopPropagation();
     try {
-      await post(`/api/v1/vms/${vm.id}/stop`);
-      addToast(`"${vm.name}" stopped`, 'success');
+      await post(`/api/v1/machines/${machine.id}/stop`);
+      addToast(`"${machine.name}" stopped`, 'success');
       onrefresh?.();
     } catch (err) {
       addToast(err instanceof Error ? err.message : 'Failed to stop', 'error');
@@ -28,8 +28,8 @@
   async function handleStart(e: MouseEvent) {
     e.stopPropagation();
     try {
-      await post(`/api/v1/vms/${vm.id}/start`);
-      addToast(`"${vm.name}" started`, 'success');
+      await post(`/api/v1/machines/${machine.id}/start`);
+      addToast(`"${machine.name}" started`, 'success');
       onrefresh?.();
     } catch (err) {
       addToast(err instanceof Error ? err.message : 'Failed to start', 'error');
@@ -38,10 +38,10 @@
 
   async function handleDelete(e: MouseEvent) {
     e.stopPropagation();
-    if (!confirm(`Delete "${vm.name}"? This cannot be undone.`)) return;
+    if (!confirm(`Delete "${machine.name}"? This cannot be undone.`)) return;
     try {
-      await del(`/api/v1/vms/${vm.id}`);
-      addToast(`"${vm.name}" deleted`, 'success');
+      await del(`/api/v1/machines/${machine.id}`);
+      addToast(`"${machine.name}" deleted`, 'success');
       onrefresh?.();
     } catch (err) {
       addToast(err instanceof Error ? err.message : 'Failed to delete', 'error');
@@ -50,7 +50,7 @@
 
   function openTerminal(e: MouseEvent) {
     e.stopPropagation();
-    window.location.hash = `/vms/${vm.id}`;
+    window.location.hash = `/machines/${machine.id}`;
   }
 </script>
 
@@ -60,14 +60,14 @@
   onclick={navigate}
 >
   <div class="flex items-center justify-between mb-3">
-    <span class="font-medium text-text truncate">{vm.name}</span>
-    <VMStatusDot status={vm.status} />
+    <span class="font-medium text-text truncate">{machine.name}</span>
+    <MachineStatusDot status={machine.status} />
   </div>
 
   <div class="space-y-1 mb-4">
-    <p class="text-sm text-muted truncate">{imageName(vm.image)}</p>
-    {#if vm.ip_address}
-      <p class="text-sm font-mono text-accent">{vm.ip_address}</p>
+    <p class="text-sm text-muted truncate">{imageName(machine.image)}</p>
+    {#if machine.ip_address}
+      <p class="text-sm font-mono text-accent">{machine.ip_address}</p>
     {/if}
   </div>
 

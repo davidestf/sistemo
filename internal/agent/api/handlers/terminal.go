@@ -18,7 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"github.com/davidestf/sistemo/internal/agent/config"
-	"github.com/davidestf/sistemo/internal/agent/vm"
+	"github.com/davidestf/sistemo/internal/agent/machine"
 	"go.uber.org/zap"
 )
 
@@ -65,23 +65,23 @@ var upgrader = websocket.Upgrader{
 }
 
 type Terminal struct {
-	mgr    *vm.Manager
+	mgr    *machine.Manager
 	cfg    *config.Config
 	logger *zap.Logger
 	db     *sql.DB
 }
 
-func NewTerminal(mgr *vm.Manager, cfg *config.Config, logger *zap.Logger, db *sql.DB) *Terminal {
+func NewTerminal(mgr *machine.Manager, cfg *config.Config, logger *zap.Logger, db *sql.DB) *Terminal {
 	return &Terminal{mgr: mgr, cfg: cfg, logger: logger, db: db}
 }
 
-// getNamespaceFromDB returns the namespace for the VM from the vm table, or "" if not found or db is nil.
-func (h *Terminal) getNamespaceFromDB(vmID string) string {
+// getNamespaceFromDB returns the namespace for the machine from the machine table, or "" if not found or db is nil.
+func (h *Terminal) getNamespaceFromDB(machineID string) string {
 	if h.db == nil {
 		return ""
 	}
 	var ns string
-	if err := h.db.QueryRow("SELECT namespace FROM vm WHERE id = ? AND status = 'running' AND namespace != '' LIMIT 1", vmID).Scan(&ns); err != nil {
+	if err := h.db.QueryRow("SELECT namespace FROM machine WHERE id = ? AND status = 'running' AND namespace != '' LIMIT 1", machineID).Scan(&ns); err != nil {
 		return ""
 	}
 	return strings.TrimSpace(ns)
@@ -109,9 +109,9 @@ func (h *Terminal) TerminalPageOrWebSocket(w http.ResponseWriter, r *http.Reques
 
 // serveTerminalPage writes an HTML page that loads xterm.js and opens a WebSocket to this same URL.
 func (h *Terminal) serveTerminalPage(w http.ResponseWriter, r *http.Request) {
-	vmID := chi.URLParam(r, "vmID")
-	if vmID == "" || !isValidSafeID(vmID) {
-		writeError(w, http.StatusBadRequest, "invalid VM id")
+	machineID := chi.URLParam(r, "machineID")
+	if machineID == "" || !isValidSafeID(machineID) {
+		writeError(w, http.StatusBadRequest, "invalid machine id")
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -167,7 +167,7 @@ var terminalTmpl = template.Must(template.New("terminal").Parse(`<!DOCTYPE html>
         var buf = new Uint8Array(ev.data);
         term.write(buf);
       };
-      ws.onclose = function() { term.writeln('\\r\\n\\x1b[31m[Connection closed]\\x1b[m'); };
+      ws.onclose = function() { term.writeln('\r\n\x1b[31m[Connection closed]\x1b[m'); };
       ws.onerror = function() { term.writeln('\r\n\x1b[31m[WebSocket error]\x1b[m'); };
     })();
   </script>
@@ -176,19 +176,19 @@ var terminalTmpl = template.Must(template.New("terminal").Parse(`<!DOCTYPE html>
 `))
 
 func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
-	vmID := chi.URLParam(r, "vmID")
-	if vmID == "" || !isValidSafeID(vmID) {
-		writeError(w, http.StatusBadRequest, "invalid VM id")
+	machineID := chi.URLParam(r, "machineID")
+	if machineID == "" || !isValidSafeID(machineID) {
+		writeError(w, http.StatusBadRequest, "invalid machine id")
 		return
 	}
 
-	ns := h.mgr.GetVMNamespace(vmID)
+	ns := h.mgr.GetMachineNamespace(machineID)
 	if ns == "" && h.db != nil {
-		ns = h.getNamespaceFromDB(vmID)
+		ns = h.getNamespaceFromDB(machineID)
 	}
-	vmip := h.mgr.GetVMIP(vmID)
+	vmip := h.mgr.GetMachineIP(machineID)
 	if ns == "" || vmip == "" {
-		writeError(w, http.StatusNotFound, "VM not found or not running")
+		writeError(w, http.StatusNotFound, "machine not found or not running")
 		return
 	}
 
@@ -259,7 +259,7 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		h.logger.Error("failed to start SSH with PTY", zap.Error(err))
-		conn.WriteMessage(websocket.TextMessage, []byte("Failed to connect to VM: "+err.Error()))
+		conn.WriteMessage(websocket.TextMessage, []byte("Failed to connect to machine: "+err.Error()))
 		return
 	}
 	defer ptmx.Close()
@@ -325,15 +325,15 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Terminal) CreateSession(w http.ResponseWriter, r *http.Request) {
-	vmID := chi.URLParam(r, "vmID")
-	if vmID == "" || !isValidSafeID(vmID) {
-		writeError(w, http.StatusBadRequest, "invalid VM id")
+	machineID := chi.URLParam(r, "machineID")
+	if machineID == "" || !isValidSafeID(machineID) {
+		writeError(w, http.StatusBadRequest, "invalid machine id")
 		return
 	}
 	host := r.Host
 	if host == "" {
 		host = fmt.Sprintf("localhost:%d", h.cfg.Port)
 	}
-	ws := fmt.Sprintf("ws://%s/terminals/vm/%s", host, vmID)
-	writeJSON(w, http.StatusOK, map[string]string{"ws_url": ws, "vm_id": vmID})
+	ws := fmt.Sprintf("ws://%s/terminals/machine/%s", host, machineID)
+	writeJSON(w, http.StatusOK, map[string]string{"ws_url": ws, "machine_id": machineID})
 }

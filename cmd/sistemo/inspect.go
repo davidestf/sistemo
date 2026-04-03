@@ -19,7 +19,7 @@ import (
 func runList(logger *zap.Logger, database *sql.DB) error {
 	rows, err := database.Query(`
 		SELECT v.id, v.name, v.status, v.image, v.ip_address, COALESCE(n.name, 'default')
-		FROM vm v LEFT JOIN network n ON v.network_id = n.id
+		FROM machine v LEFT JOIN network n ON v.network_id = n.id
 		WHERE v.status != 'deleted'`)
 	if err != nil {
 		return fmt.Errorf("query vms: %w", err)
@@ -49,7 +49,7 @@ func runList(logger *zap.Logger, database *sql.DB) error {
 	}
 	// Build volume count map
 	volCounts := make(map[string]int)
-	volRows, err := database.Query("SELECT attached, COUNT(*) FROM volume WHERE attached IS NOT NULL GROUP BY attached")
+	volRows, err := database.Query("SELECT machine_id, COUNT(*) FROM volume WHERE machine_id IS NOT NULL GROUP BY machine_id")
 	if err == nil {
 		defer volRows.Close()
 		for volRows.Next() {
@@ -98,7 +98,7 @@ func runStatus(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 		return err
 	}
 	row := database.QueryRow(
-		"SELECT id, name, status, image, ip_address, namespace, created_at, network_id FROM vm WHERE id = ?",
+		"SELECT id, name, status, image, ip_address, namespace, created_at, network_id FROM machine WHERE id = ?",
 		vmID,
 	)
 	var id, name, status, image, ip, ns, created, networkID sql.NullString
@@ -123,7 +123,7 @@ func runStatus(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 		Path string `json:"path"`
 	}
 	var volumes []volInfo
-	volRows, err := database.Query("SELECT name, size_mb, role, path FROM volume WHERE attached = ?", id.String)
+	volRows, err := database.Query("SELECT name, size_mb, role, path FROM volume WHERE machine_id = ?", id.String)
 	if err == nil {
 		defer volRows.Close()
 		for volRows.Next() {
@@ -136,17 +136,17 @@ func runStatus(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 
 	// Collect ports
 	type portInfo struct {
-		HostPort int    `json:"host_port"`
-		VMPort   int    `json:"vm_port"`
-		Protocol string `json:"protocol"`
+		HostPort    int    `json:"host_port"`
+		MachinePort int    `json:"machine_port"`
+		Protocol    string `json:"protocol"`
 	}
 	var ports []portInfo
-	portRows, err := database.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", id.String)
+	portRows, err := database.Query("SELECT host_port, machine_port, protocol FROM port_rule WHERE machine_id = ?", id.String)
 	if err == nil {
 		defer portRows.Close()
 		for portRows.Next() {
 			var p portInfo
-			if portRows.Scan(&p.HostPort, &p.VMPort, &p.Protocol) == nil {
+			if portRows.Scan(&p.HostPort, &p.MachinePort, &p.Protocol) == nil {
 				ports = append(ports, p)
 			}
 		}
@@ -188,7 +188,7 @@ func runStatus(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	if len(ports) > 0 {
 		fmt.Printf("Ports:\n")
 		for _, p := range ports {
-			fmt.Printf("  host:%d -> VM:%d (%s)\n", p.HostPort, p.VMPort, p.Protocol)
+			fmt.Printf("  host:%d -> VM:%d (%s)\n", p.HostPort, p.MachinePort, p.Protocol)
 		}
 	}
 	return nil
@@ -201,7 +201,7 @@ func runLogs(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	}
 	baseURL := daemon.URL()
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(baseURL + "/vms/" + vmID + "/logs")
+	resp, err := client.Get(baseURL + "/api/v1/machines/" + vmID + "/logs")
 	if err != nil {
 		return fmt.Errorf("fetch logs: %w", err)
 	}

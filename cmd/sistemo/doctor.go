@@ -158,20 +158,20 @@ func checkBridge() checkResult {
 }
 
 func checkMasquerade() checkResult {
-	out, err := exec.Command("iptables", "-t", "nat", "-L", "POSTROUTING", "-n").CombinedOutput()
+	out, err := exec.Command("nft", "-j", "list", "chain", "inet", "sistemo", "sistemo-postrouting").CombinedOutput()
 	if err != nil {
 		if syscall.Geteuid() != 0 {
 			return checkResult{name: "masquerade", ok: false,
-				message: "Cannot check iptables (not root). Run doctor as root for full check."}
+				message: "Cannot check nftables (not root). Run doctor as root for full check."}
 		}
 		return checkResult{name: "masquerade", ok: false,
-			message: "Cannot query iptables rules"}
+			message: "nftables sistemo table not found. Start the daemon: sudo sistemo up"}
 	}
-	if strings.Contains(string(out), "MASQUERADE") {
-		return checkResult{name: "masquerade", ok: true, message: "iptables MASQUERADE rule active"}
+	if strings.Contains(string(out), "masquerade") {
+		return checkResult{name: "masquerade", ok: true, message: "nftables MASQUERADE rule active"}
 	}
 	return checkResult{name: "masquerade", ok: false,
-		message: "iptables MASQUERADE rule missing. Start the daemon: sudo sistemo up"}
+		message: "nftables MASQUERADE rule missing. Start the daemon: sudo sistemo up"}
 }
 
 func checkDaemon() checkResult {
@@ -186,18 +186,20 @@ func checkDaemon() checkResult {
 		return checkResult{name: "daemon", ok: false,
 			message: fmt.Sprintf("Daemon returned HTTP %d", resp.StatusCode)}
 	}
-	// Count running VMs
-	vmResp, err := client.Get("http://127.0.0.1:7777/vms")
-	vmCount := "?"
+	// Count running machines
+	machineResp, err := client.Get("http://127.0.0.1:7777/api/v1/machines")
+	machineCount := "?"
 	if err == nil {
-		defer vmResp.Body.Close()
-		var vms []json.RawMessage
-		if json.NewDecoder(io.LimitReader(vmResp.Body, 1<<20)).Decode(&vms) == nil {
-			vmCount = fmt.Sprintf("%d", len(vms))
+		defer machineResp.Body.Close()
+		var result struct {
+			Machines []json.RawMessage `json:"machines"`
+		}
+		if json.NewDecoder(io.LimitReader(machineResp.Body, 1<<20)).Decode(&result) == nil {
+			machineCount = fmt.Sprintf("%d", len(result.Machines))
 		}
 	}
 	return checkResult{name: "daemon", ok: true,
-		message: fmt.Sprintf("Daemon reachable at http://127.0.0.1:7777 (%s VMs running)", vmCount)}
+		message: fmt.Sprintf("Daemon reachable at http://127.0.0.1:7777 (%s machines running)", machineCount)}
 }
 
 func checkDiskSpace(dataDir string) checkResult {
@@ -232,7 +234,7 @@ func checkDatabase(dataDir string) checkResult {
 	defer db.Close()
 
 	var vmCount, portCount int
-	if err := db.QueryRow("SELECT COUNT(*) FROM vm WHERE status NOT IN ('deleted')").Scan(&vmCount); err != nil {
+	if err := db.QueryRow("SELECT COUNT(*) FROM machine WHERE status NOT IN ('deleted')").Scan(&vmCount); err != nil {
 		return checkResult{name: "database", ok: false, message: fmt.Sprintf("query VMs: %v", err)}
 	}
 	if err := db.QueryRow("SELECT COUNT(*) FROM port_rule").Scan(&portCount); err != nil {

@@ -200,11 +200,13 @@ func (n *VMNetwork) Create() error {
 		return fmt.Errorf("failed to bring up TAP: %s", out)
 	}
 
-	// Block outbound SMTP (spam prevention) — rules auto-destroyed with namespace
+	// Block outbound SMTP (spam prevention) — uses nftables inside the namespace
 	if n.BlockSMTP {
-		for _, port := range []string{"25", "465", "587"} {
-			runInNamespace(n.NamespaceName, "iptables", "-I", "FORWARD", "1",
-				"-p", "tcp", "--dport", port, "-j", "DROP")
+		firewall, err := GetFirewall(log)
+		if err == nil {
+			if smtpErr := firewall.BlockSMTPInNamespace(n.NamespaceName); smtpErr != nil {
+				log.Warn("failed to block SMTP", zap.Error(smtpErr))
+			}
 		}
 	}
 
@@ -216,7 +218,7 @@ func (n *VMNetwork) Create() error {
 }
 
 // Cleanup removes the namespace and detaches the veth from the host bridge.
-// Deleting the namespace auto-destroys: veth-in, namespace bridge, TAP, all namespace iptables.
+// Deleting the namespace auto-destroys: veth-in, namespace bridge, TAP, all namespace nftables.
 func (n *VMNetwork) Cleanup(_ string) error {
 	log := n.logger()
 	log.Info("cleaning up namespace", zap.String("namespace", n.NamespaceName))
@@ -226,7 +228,7 @@ func (n *VMNetwork) Cleanup(_ string) error {
 		vethOut = "vo-" + strings.TrimPrefix(n.NamespaceName, "ns-")
 	}
 
-	// Delete namespace (auto-destroys veth-in, ns bridge, TAP, internal iptables)
+	// Delete namespace (auto-destroys veth-in, ns bridge, TAP, internal nftables)
 	if rc, out, _ := run("ip", "netns", "delete", n.NamespaceName); rc != 0 {
 		// "No such file" is expected when namespace was already cleaned (e.g. stop then delete)
 		if !strings.Contains(out, "No such file") {
@@ -268,116 +270,42 @@ func (n *VMNetwork) ExposePort(_ string, hostPort, vmPort int, protocol string) 
 	if gonet.ParseIP(n.VMIP) == nil {
 		return fmt.Errorf("invalid VM IP %q", n.VMIP)
 	}
-	hp := fmt.Sprintf("%d", hostPort)
-	vp := fmt.Sprintf("%d", vmPort)
-	dest := fmt.Sprintf("%s:%d", n.VMIP, vmPort)
 
-	// DNAT: external traffic — check first, add only if missing.
-	prArgs := []string{"!", "-i", n.HostBridge, "-p", protocol, "--dport", hp, "-j", "DNAT", "--to-destination", dest}
-	addedPR := false
-	if rc, _, _ := run("iptables", append([]string{"-t", "nat", "-C", "PREROUTING"}, prArgs...)...); rc != 0 {
-		if rc, out, _ := run("iptables", append([]string{"-t", "nat", "-A", "PREROUTING"}, prArgs...)...); rc != 0 {
-			return fmt.Errorf("PREROUTING DNAT failed: %s", out)
-		}
-		addedPR = true
+	firewall, err := GetFirewall(n.logger())
+	if err != nil {
+		return fmt.Errorf("get firewall: %w", err)
 	}
 
-	// DNAT: localhost traffic — check first, add only if missing.
-	outArgs := []string{"-p", protocol, "--dport", hp, "-d", "127.0.0.1", "-j", "DNAT", "--to-destination", dest}
-	addedOUT := false
-	if rc, _, _ := run("iptables", append([]string{"-t", "nat", "-C", "OUTPUT"}, outArgs...)...); rc != 0 {
-		if rc, out, _ := run("iptables", append([]string{"-t", "nat", "-A", "OUTPUT"}, outArgs...)...); rc != 0 {
-			// Rollback PREROUTING rule if we added it
-			if addedPR {
-				run("iptables", append([]string{"-t", "nat", "-D", "PREROUTING"}, prArgs...)...)
-			}
-			return fmt.Errorf("OUTPUT DNAT failed: %s", out)
-		}
-		addedOUT = true
-	}
-
-	// FORWARD: allow traffic to this VM — check first, add only if missing.
-	fwdArgs := []string{"-d", n.VMIP, "-p", protocol, "--dport", vp, "-j", "ACCEPT"}
-	if rc, _, _ := run("iptables", append([]string{"-C", "FORWARD"}, fwdArgs...)...); rc != 0 {
-		if rc, out, _ := run("iptables", append([]string{"-I", "FORWARD", "1"}, fwdArgs...)...); rc != 0 {
-			// Rollback previously added rules
-			if addedPR {
-				run("iptables", append([]string{"-t", "nat", "-D", "PREROUTING"}, prArgs...)...)
-			}
-			if addedOUT {
-				run("iptables", append([]string{"-t", "nat", "-D", "OUTPUT"}, outArgs...)...)
-			}
-			return fmt.Errorf("FORWARD rule failed: %s", out)
-		}
-	}
-	return nil
+	return firewall.AddDNAT(hostPort, vmPort, n.VMIP, protocol, n.HostBridge)
 }
 
 // UnexposePort removes the DNAT rules for the given hostPort.
 func (n *VMNetwork) UnexposePort(_ string, hostPort, vmPort int, protocol string) error {
-	hp := fmt.Sprintf("%d", hostPort)
-	vp := fmt.Sprintf("%d", vmPort)
-	dest := fmt.Sprintf("%s:%d", n.VMIP, vmPort)
+	firewall, err := GetFirewall(n.logger())
+	if err != nil {
+		return fmt.Errorf("get firewall: %w", err)
+	}
 
-	run("iptables", "-t", "nat", "-D", "PREROUTING",
-		"!", "-i", n.HostBridge, "-p", protocol, "--dport", hp,
-		"-j", "DNAT", "--to-destination", dest)
-	run("iptables", "-t", "nat", "-D", "OUTPUT",
-		"-p", protocol, "--dport", hp, "-d", "127.0.0.1",
-		"-j", "DNAT", "--to-destination", dest)
-	run("iptables", "-D", "FORWARD",
-		"-d", n.VMIP, "-p", protocol, "--dport", vp,
-		"-j", "ACCEPT")
-	return nil
+	return firewall.RemoveDNAT(hostPort, vmPort, n.VMIP, protocol)
 }
 
 // CleanupPortRules removes all DNAT rules for the given port rules.
 func (n *VMNetwork) CleanupPortRules(_ string, rules []PortRule) {
 	for _, r := range rules {
-		n.UnexposePort("", r.HostPort, r.VMPort, r.Protocol)
+		n.UnexposePort("", r.HostPort, r.MachinePort, r.Protocol)
 	}
 }
 
 // FlushDNATRulesForPort removes ALL DNAT rules targeting a specific host port,
 // regardless of destination IP. This handles stale rules from old VMs whose IP
 // changed after reboot or redeployment. Called on daemon startup before restoring
-// port rules to ensure a clean iptables state.
-//
-// Uses iptables -D with line numbers from --line-numbers to delete by rule number
-// (highest first to avoid index shifts).
+// port rules to ensure a clean nftables state.
 func FlushDNATRulesForPort(hostPort int, protocol string) {
-	hp := fmt.Sprintf("%d", hostPort)
-
-	// Flush from PREROUTING and OUTPUT chains
-	for _, chain := range []string{"PREROUTING", "OUTPUT"} {
-		for attempt := 0; attempt < 50; attempt++ {
-			// List rules with line numbers to find matches
-			_, out, _ := run("iptables", "-t", "nat", "-L", chain, "-n", "--line-numbers")
-			found := false
-			for _, line := range strings.Split(out, "\n") {
-				// Match lines containing our port and DNAT
-				if !strings.Contains(line, "dpt:"+hp) || !strings.Contains(line, "DNAT") {
-					continue
-				}
-				// Extract line number (first field)
-				fields := strings.Fields(line)
-				if len(fields) < 2 {
-					continue
-				}
-				lineNum := fields[0]
-				if lineNum == "num" {
-					continue // header row
-				}
-				// Delete by line number
-				run("iptables", "-t", "nat", "-D", chain, lineNum)
-				found = true
-				break // restart scan since line numbers shifted
-			}
-			if !found {
-				break
-			}
-		}
+	firewall, err := GetFirewall(zap.NewNop())
+	if err != nil {
+		return
 	}
+	firewall.FlushDNATForPort(hostPort, protocol)
 }
 
 // GetBootArgs returns the kernel boot args for static IP configuration.
@@ -413,7 +341,7 @@ func GetBootArgsForSubnet(vmIP, cidr string) string {
 	return fmt.Sprintf("ip=%s::%s:%s::eth0:off", vmIP, gw.String(), netmask)
 }
 
-// CleanupAllNamespaces removes all ns-* namespaces and their veth/iptables (for startup cleanup).
+// CleanupAllNamespaces removes all ns-* namespaces and their veth/nftables (for startup cleanup).
 // preserve is an optional set of namespace names to keep (e.g. namespaces of VMs rehydrated from disk).
 func CleanupAllNamespaces(hostInterface string, logger *zap.Logger, preserve map[string]struct{}) {
 	if hostInterface == "" {

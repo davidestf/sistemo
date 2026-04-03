@@ -12,15 +12,15 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/davidestf/sistemo/internal/agent/config"
+	"github.com/davidestf/sistemo/internal/agent/machine"
 	"github.com/davidestf/sistemo/internal/agent/network"
-	"github.com/davidestf/sistemo/internal/agent/vm"
 	"go.uber.org/zap"
 )
 
 // DashboardAPI serves the /api/v1/ endpoints for the dashboard frontend.
 // It joins DB state with in-memory manager data for rich responses.
 type DashboardAPI struct {
-	mgr             *vm.Manager
+	mgr             *machine.Manager
 	cfg             *config.Config
 	db              *sql.DB
 	logger          *zap.Logger
@@ -28,7 +28,7 @@ type DashboardAPI struct {
 	VMInitScript    []byte // embedded vm-init.sh content
 }
 
-func NewDashboardAPI(mgr *vm.Manager, cfg *config.Config, db *sql.DB, logger *zap.Logger) *DashboardAPI {
+func NewDashboardAPI(mgr *machine.Manager, cfg *config.Config, db *sql.DB, logger *zap.Logger) *DashboardAPI {
 	api := &DashboardAPI{mgr: mgr, cfg: cfg, db: db, logger: logger}
 	api.CleanupOrphanedDownloads()
 	return api
@@ -36,7 +36,7 @@ func NewDashboardAPI(mgr *vm.Manager, cfg *config.Config, db *sql.DB, logger *za
 
 // --- Response types (shared across dashboard_*.go files) ---
 
-type vmV1Response struct {
+type machineV1Response struct {
 	ID                   string          `json:"id"`
 	Name                 string          `json:"name"`
 	Status               string          `json:"status"`
@@ -56,73 +56,73 @@ type vmV1Response struct {
 }
 
 type portRuleEntry struct {
-	HostPort int    `json:"host_port"`
-	VMPort   int    `json:"vm_port"`
-	Protocol string `json:"protocol"`
+	HostPort    int    `json:"host_port"`
+	MachinePort int    `json:"machine_port"`
+	Protocol    string `json:"protocol"`
 }
 
 type networkV1Response struct {
-	Name       string `json:"name"`
-	Subnet     string `json:"subnet"`
-	BridgeName string `json:"bridge_name"`
-	VMCount    int    `json:"vm_count"`
-	CreatedAt  string `json:"created_at,omitempty"`
+	Name         string `json:"name"`
+	Subnet       string `json:"subnet"`
+	BridgeName   string `json:"bridge_name"`
+	MachineCount int    `json:"machine_count"`
+	CreatedAt    string `json:"created_at,omitempty"`
 }
 
 // --- Handlers ---
 
-// ListVMs returns all non-deleted VMs with port rules and live PID.
-func (h *DashboardAPI) ListVMs(w http.ResponseWriter, r *http.Request) {
-	vms, err := h.queryVMs("")
+// ListMachines returns all non-deleted machines with port rules and live PID.
+func (h *DashboardAPI) ListMachines(w http.ResponseWriter, r *http.Request) {
+	machines, err := h.queryMachines("")
 	if err != nil {
-		h.logger.Error("api/v1/vms query failed", zap.Error(err))
-		writeError(w, http.StatusInternalServerError, "failed to query VMs")
+		h.logger.Error("api/v1/machines query failed", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "failed to query machines")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"vms": vms})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"machines": machines})
 }
 
-// GetVM returns a single VM by ID.
-func (h *DashboardAPI) GetVM(w http.ResponseWriter, r *http.Request) {
-	vmID := chi.URLParam(r, "vmID")
-	if !isValidSafeID(vmID) {
-		writeError(w, http.StatusBadRequest, "invalid VM id")
+// GetMachine returns a single machine by ID.
+func (h *DashboardAPI) GetMachine(w http.ResponseWriter, r *http.Request) {
+	machineID := chi.URLParam(r, "machineID")
+	if !isValidSafeID(machineID) {
+		writeError(w, http.StatusBadRequest, "invalid machine id")
 		return
 	}
-	vms, err := h.queryVMs(vmID)
+	machines, err := h.queryMachines(machineID)
 	if err != nil {
-		h.logger.Error("api/v1/vms/{id} query failed", zap.Error(err))
-		writeError(w, http.StatusInternalServerError, "failed to query VM")
+		h.logger.Error("api/v1/machines/{id} query failed", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "failed to query machine")
 		return
 	}
-	if len(vms) == 0 {
-		writeError(w, http.StatusNotFound, "VM not found")
+	if len(machines) == 0 {
+		writeError(w, http.StatusNotFound, "machine not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, vms[0])
+	writeJSON(w, http.StatusOK, machines[0])
 }
 
-// queryVMs fetches VMs from DB and enriches with in-memory PID + port rules.
-// If vmID is empty, returns all non-deleted VMs. Otherwise filters by ID.
-func (h *DashboardAPI) queryVMs(vmID string) ([]vmV1Response, error) {
+// queryMachines fetches machines from DB and enriches with in-memory PID + port rules.
+// If machineID is empty, returns all non-deleted machines. Otherwise filters by ID.
+func (h *DashboardAPI) queryMachines(machineID string) ([]machineV1Response, error) {
 	if h.db == nil {
-		return []vmV1Response{}, nil
+		return []machineV1Response{}, nil
 	}
 
 	query := `
-		SELECT v.id, v.name, v.status, v.maintenance_operation, v.image,
-		       v.ip_address, v.namespace, v.vcpus, v.memory_mb, v.storage_mb,
-		       COALESCE(n.name, 'default'), v.created_at, v.last_state_change,
-		       COALESCE(v.image_digest, '')
-		FROM vm v LEFT JOIN network n ON v.network_id = n.id
-		WHERE v.status != 'deleted'`
+		SELECT m.id, m.name, m.status, m.maintenance_operation, m.image,
+		       m.ip_address, m.namespace, m.vcpus, m.memory_mb, m.storage_mb,
+		       COALESCE(n.name, 'default'), m.created_at, m.last_state_change,
+		       COALESCE(m.image_digest, '')
+		FROM machine m LEFT JOIN network n ON m.network_id = n.id
+		WHERE m.status != 'deleted'`
 	args := []interface{}{}
 
-	if vmID != "" {
-		query += " AND v.id = ?"
-		args = append(args, vmID)
+	if machineID != "" {
+		query += " AND m.id = ?"
+		args = append(args, machineID)
 	}
-	query += " ORDER BY v.last_state_change DESC"
+	query += " ORDER BY m.last_state_change DESC"
 
 	rows, err := h.db.Query(query, args...)
 	if err != nil {
@@ -132,44 +132,44 @@ func (h *DashboardAPI) queryVMs(vmID string) ([]vmV1Response, error) {
 
 	// Build PID lookup from in-memory manager
 	pidMap := map[string]int{}
-	for _, info := range h.mgr.ListVMs() {
-		pidMap[info.VMID] = info.PID
+	for _, info := range h.mgr.ListMachines() {
+		pidMap[info.MachineID] = info.PID
 	}
 
-	var result []vmV1Response
+	var result []machineV1Response
 	for rows.Next() {
-		var v vmV1Response
+		var m machineV1Response
 		var maintOp, image, ip, ns, netName, createdAt, lastChange sql.NullString
 		var imageDigest string
-		if err := rows.Scan(&v.ID, &v.Name, &v.Status, &maintOp, &image,
-			&ip, &ns, &v.VCPUs, &v.MemoryMB, &v.StorageMB,
+		if err := rows.Scan(&m.ID, &m.Name, &m.Status, &maintOp, &image,
+			&ip, &ns, &m.VCPUs, &m.MemoryMB, &m.StorageMB,
 			&netName, &createdAt, &lastChange, &imageDigest); err != nil {
-			h.logger.Warn("scan VM row failed", zap.Error(err))
+			h.logger.Warn("scan machine row failed", zap.Error(err))
 			continue
 		}
-		v.MaintenanceOperation = maintOp.String
-		v.Image = image.String
-		v.IPAddress = ip.String
-		v.Namespace = ns.String
-		v.NetworkName = netName.String
-		v.CreatedAt = createdAt.String
-		v.LastStateChange = lastChange.String
-		v.PID = pidMap[v.ID]
-		v.ImageDigest = imageDigest
-		v.PortRules = h.queryPortRules(v.ID)
-		result = append(result, v)
+		m.MaintenanceOperation = maintOp.String
+		m.Image = image.String
+		m.IPAddress = ip.String
+		m.Namespace = ns.String
+		m.NetworkName = netName.String
+		m.CreatedAt = createdAt.String
+		m.LastStateChange = lastChange.String
+		m.PID = pidMap[m.ID]
+		m.ImageDigest = imageDigest
+		m.PortRules = h.queryPortRules(m.ID)
+		result = append(result, m)
 	}
 	if result == nil {
-		result = []vmV1Response{} // return [] not null
+		result = []machineV1Response{} // return [] not null
 	}
 	return result, rows.Err()
 }
 
-func (h *DashboardAPI) queryPortRules(vmID string) []portRuleEntry {
+func (h *DashboardAPI) queryPortRules(machineID string) []portRuleEntry {
 	if h.db == nil {
 		return []portRuleEntry{}
 	}
-	rows, err := h.db.Query("SELECT host_port, vm_port, protocol FROM port_rule WHERE vm_id = ?", vmID)
+	rows, err := h.db.Query("SELECT host_port, machine_port, protocol FROM port_rule WHERE machine_id = ?", machineID)
 	if err != nil {
 		return []portRuleEntry{}
 	}
@@ -177,7 +177,7 @@ func (h *DashboardAPI) queryPortRules(vmID string) []portRuleEntry {
 	var rules []portRuleEntry
 	for rows.Next() {
 		var r portRuleEntry
-		if rows.Scan(&r.HostPort, &r.VMPort, &r.Protocol) == nil {
+		if rows.Scan(&r.HostPort, &r.MachinePort, &r.Protocol) == nil {
 			rules = append(rules, r)
 		}
 	}
@@ -197,7 +197,7 @@ func (h *DashboardAPI) System(w http.ResponseWriter, r *http.Request) {
 		healthStatus = "degraded"
 	}
 
-	// VM stats from DB
+	// Machine stats from DB
 	var total, running, stopped, errored int
 	var vcpusAlloc, memAlloc int
 	dbOK := true
@@ -206,12 +206,12 @@ func (h *DashboardAPI) System(w http.ResponseWriter, r *http.Request) {
 			sql  string
 			dest *int
 		}{
-			{"SELECT COUNT(*) FROM vm WHERE status != 'deleted'", &total},
-			{"SELECT COUNT(*) FROM vm WHERE status = 'running'", &running},
-			{"SELECT COUNT(*) FROM vm WHERE status = 'stopped'", &stopped},
-			{"SELECT COUNT(*) FROM vm WHERE status IN ('error','failed','unhealthy')", &errored},
-			{"SELECT COALESCE(SUM(vcpus),0) FROM vm WHERE status = 'running'", &vcpusAlloc},
-			{"SELECT COALESCE(SUM(memory_mb),0) FROM vm WHERE status = 'running'", &memAlloc},
+			{"SELECT COUNT(*) FROM machine WHERE status != 'deleted'", &total},
+			{"SELECT COUNT(*) FROM machine WHERE status = 'running'", &running},
+			{"SELECT COUNT(*) FROM machine WHERE status = 'stopped'", &stopped},
+			{"SELECT COUNT(*) FROM machine WHERE status IN ('error','failed','unhealthy')", &errored},
+			{"SELECT COALESCE(SUM(vcpus),0) FROM machine WHERE status = 'running'", &vcpusAlloc},
+			{"SELECT COALESCE(SUM(memory_mb),0) FROM machine WHERE status = 'running'", &memAlloc},
 		} {
 			if err := h.db.QueryRow(q.sql).Scan(q.dest); err != nil {
 				h.logger.Warn("system stats query failed", zap.String("query", q.sql), zap.Error(err))

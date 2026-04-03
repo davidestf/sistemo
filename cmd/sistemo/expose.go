@@ -12,16 +12,16 @@ import (
 	"github.com/davidestf/sistemo/internal/daemon"
 )
 
-func vmExposeCmd() *cobra.Command {
+func machineExposeCmd() *cobra.Command {
 	var portFlag string
 	cmd := &cobra.Command{
-		Use:   "expose <name|id> --port <[hostPort:]vmPort>",
-		Short: "Expose a VM port on the host",
-		Long: `Expose a VM port by creating iptables DNAT rules.
+		Use:   "expose <name|id> --port <[hostPort:]machinePort>",
+		Short: "Expose a machine port on the host",
+		Long: `Expose a machine port by creating nftables DNAT rules.
 
 Examples:
-  sistemo vm expose myvm --port 80           # host:80 → VM:80
-  sistemo vm expose myvm --port 8080:80      # host:8080 → VM:80`,
+  sistemo machine expose myvm --port 80           # host:80 → machine:80
+  sistemo machine expose myvm --port 8080:80      # host:8080 → machine:80`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := getLogger(cmd)
@@ -34,7 +34,7 @@ Examples:
 	return cmd
 }
 
-func vmUnexposeCmd() *cobra.Command {
+func machineUnexposeCmd() *cobra.Command {
 	var portFlag int
 	cmd := &cobra.Command{
 		Use:   "unexpose <name|id> --port <hostPort>",

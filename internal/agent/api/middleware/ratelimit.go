@@ -82,8 +82,10 @@ func (rl *IPRateLimiter) Middleware() func(http.Handler) http.Handler {
 				ip = r.RemoteAddr
 			}
 			if !rl.getLimiter(ip).Allow() {
+				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", "1")
-				http.Error(w, `{"error":"rate limited"}`, http.StatusTooManyRequests)
+				w.WriteHeader(http.StatusTooManyRequests)
+				w.Write([]byte(`{"error":"rate limited"}`))
 				return
 			}
 			next.ServeHTTP(w, r)

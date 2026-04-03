@@ -4,27 +4,27 @@
   import Button from '../ui/Button.svelte';
 
   let {
-    vmId,
+    machineId,
     onexposed,
   }: {
-    vmId: string;
+    machineId: string;
     onexposed: () => void;
   } = $props();
 
   let hostPort = $state('');
-  let vmPort = $state('');
+  let machinePort = $state('');
   let submitting = $state(false);
 
   async function handleSubmit(e: SubmitEvent) {
     e.preventDefault();
-    const vp = parseInt(vmPort, 10);
-    if (!vp || vp < 1 || vp > 65535) {
-      addToast('VM port is required (1-65535)', 'error');
+    const mp = parseInt(machinePort, 10);
+    if (!mp || mp < 1 || mp > 65535) {
+      addToast('Machine port is required (1-65535)', 'error');
       return;
     }
 
-    // Auto-assign host port = vm port if not specified
-    const hp = hostPort.trim() ? parseInt(hostPort, 10) : vp;
+    // Auto-assign host port = machine port if not specified
+    const hp = hostPort.trim() ? parseInt(hostPort, 10) : mp;
     if (hp < 1 || hp > 65535) {
       addToast('Host port must be 1-65535', 'error');
       return;
@@ -32,14 +32,14 @@
 
     submitting = true;
     try {
-      await post(`/api/v1/vms/${vmId}/expose`, {
+      await post(`/api/v1/machines/${machineId}/expose`, {
         host_port: hp,
-        vm_port: vp,
+        machine_port: mp,
         protocol: 'tcp',
       });
-      addToast(`Port ${hp} → ${vp}/tcp exposed`, 'success');
+      addToast(`Port ${hp} -> ${mp}/tcp exposed`, 'success');
       hostPort = '';
-      vmPort = '';
+      machinePort = '';
       onexposed();
     } catch (err) {
       addToast(err instanceof Error ? err.message : 'Failed to expose port', 'error');
@@ -57,18 +57,18 @@
       type="text"
       inputmode="numeric"
       bind:value={hostPort}
-      placeholder="same as VM port"
+      placeholder="same as machine port"
       class="w-full px-3 py-2 bg-surface-inner border border-border rounded-lg text-sm text-text placeholder:text-muted/50 focus:outline-none focus:border-accent"
     />
   </div>
 
   <div class="flex-1">
-    <label for="vm-port" class="block text-xs text-muted mb-1">VM Port</label>
+    <label for="machine-port" class="block text-xs text-muted mb-1">Machine Port</label>
     <input
-      id="vm-port"
+      id="machine-port"
       type="text"
       inputmode="numeric"
-      bind:value={vmPort}
+      bind:value={machinePort}
       placeholder="80"
       required
       class="w-full px-3 py-2 bg-surface-inner border border-border rounded-lg text-sm text-text placeholder:text-muted/50 focus:outline-none focus:border-accent"

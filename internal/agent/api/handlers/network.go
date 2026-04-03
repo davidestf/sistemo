@@ -126,16 +126,16 @@ func (h *Network) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if any VMs are using this network
+	// Check if any machines are using this network
 	if h.db != nil {
-		var vmCount int
-		if err := h.db.QueryRow("SELECT COUNT(*) FROM vm WHERE network_id = (SELECT id FROM network WHERE name = ?) AND status NOT IN ('deleted')", name).Scan(&vmCount); err != nil {
+		var machineCount int
+		if err := h.db.QueryRow("SELECT COUNT(*) FROM machine WHERE network_id = (SELECT id FROM network WHERE name = ?) AND status NOT IN ('deleted')", name).Scan(&machineCount); err != nil {
 			h.logger.Error("failed to check network usage", zap.String("network", name), zap.Error(err))
 			writeError(w, http.StatusInternalServerError, "failed to check network usage")
 			return
 		}
-		if vmCount > 0 {
-			writeError(w, http.StatusConflict, fmt.Sprintf("network %q has %d active VM(s) — delete or move them first", name, vmCount))
+		if machineCount > 0 {
+			writeError(w, http.StatusConflict, fmt.Sprintf("network %q has %d active machine(s) — delete or move them first", name, machineCount))
 			return
 		}
 	}

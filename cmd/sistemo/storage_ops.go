@@ -47,7 +47,7 @@ func runStorageList(logger *zap.Logger) error {
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tNAME\tSIZE\tSTATUS\tATTACHED TO")
 	for _, v := range list {
-		attached := v.Attached
+		attached := v.MachineID
 		if attached == "" {
 			attached = "(none)"
 		}
@@ -87,8 +87,8 @@ func runStorageShow(logger *zap.Logger, idOrName string) error {
 	fmt.Printf("Size:       %d MB\n", vol.SizeMB)
 	fmt.Printf("Status:     %s\n", colorStatus(vol.Status))
 	fmt.Printf("Path:       %s\n", vol.Path)
-	if vol.Attached != "" {
-		fmt.Printf("Attached:   %s\n", vol.Attached)
+	if vol.MachineID != "" {
+		fmt.Printf("Attached:   %s\n", vol.MachineID)
 	}
 	if vol.Created != "" {
 		fmt.Printf("Created:    %s\n", vol.Created)

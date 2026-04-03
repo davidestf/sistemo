@@ -22,6 +22,11 @@ func confirmAction(action, target string) bool {
 	if outputFormat == "json" {
 		return true // non-interactive mode, skip confirmation
 	}
+	// In non-TTY (piped) environments, default to deny to prevent hanging on stdin.
+	// Use --yes flag to skip confirmation in scripts.
+	if !isTTY() {
+		return false
+	}
 	fmt.Fprintf(os.Stderr, "Are you sure you want to %s %s? [y/N] ", action, target)
 	var answer string
 	fmt.Scanln(&answer)

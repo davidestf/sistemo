@@ -39,8 +39,8 @@ func newLogger() *zap.Logger {
 func rootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sistemo",
-		Short: "Self-hosted Firecracker VM runner",
-		Long:  "Sistemo lets you run real Firecracker microVMs on your own Linux machine. Use 'sistemo up' to start the daemon, then 'sistemo vm deploy <image>' to create a VM.",
+		Short: "Self-hosted Firecracker machine runner",
+		Long:  "Sistemo lets you run real Firecracker microVMs on your own Linux machine.\nUse 'sistemo up' to start the daemon, then 'sistemo machine deploy <image>' to create a machine.",
 	}
 	var dataDir string
 	cmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "Data directory (default: ~/.sistemo)")
@@ -143,7 +143,7 @@ func Execute() {
 	root.AddCommand(sshKeyCmd())
 	root.AddCommand(imageCmd())
 	root.AddCommand(volumeCmd())
-	root.AddCommand(vmCmd())
+	root.AddCommand(machineCmd())
 	root.AddCommand(networkCmd())
 	root.AddCommand(serviceCmd())
 	root.AddCommand(configShowCmd())

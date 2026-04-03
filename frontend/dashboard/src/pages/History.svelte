@@ -119,9 +119,9 @@
                 <td class="px-5 py-3 text-muted whitespace-nowrap">{formatDate(entry.timestamp)}</td>
                 <td class="px-5 py-3 text-text">{entry.action}</td>
                 <td class="px-5 py-3">
-                  {#if entry.target_type === 'vm' && entry.target_id}
+                  {#if entry.target_type === 'machine' && entry.target_id}
                     <a
-                      href="#/vms/{entry.target_id}"
+                      href="#/machines/{entry.target_id}"
                       class="text-accent hover:underline font-medium"
                     >
                       {entry.target_name || entry.target_id}

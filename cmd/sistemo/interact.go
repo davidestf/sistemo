@@ -14,16 +14,16 @@ import (
 )
 
 func runSSH(logger *zap.Logger, database *sql.DB, dataDir, nameOrID string) error {
-	vmID, err := lookupVM(database, nameOrID, "deleted", "error", "failed", "stopped", "maintenance")
+	machineID, err := lookupVM(database, nameOrID, "deleted", "error", "failed", "stopped", "maintenance")
 	if err != nil {
-		return fmt.Errorf("VM not found or not running: %s", nameOrID)
+		return fmt.Errorf("machine not found or not running: %s", nameOrID)
 	}
 	var ip sql.NullString
-	if err := database.QueryRow("SELECT ip_address FROM vm WHERE id = ?", vmID).Scan(&ip); err != nil {
-		return fmt.Errorf("lookup vm IP: %w", err)
+	if err := database.QueryRow("SELECT ip_address FROM machine WHERE id = ?", machineID).Scan(&ip); err != nil {
+		return fmt.Errorf("lookup machine IP: %w", err)
 	}
 	if !ip.Valid || ip.String == "" {
-		return fmt.Errorf("VM has no IP address: %s", vmID)
+		return fmt.Errorf("machine has no IP address: %s", machineID)
 	}
 
 	sshKeyPath := filepath.Join(dataDir, "ssh", "sistemo_key")
@@ -52,12 +52,12 @@ func runSSH(logger *zap.Logger, database *sql.DB, dataDir, nameOrID string) erro
 }
 
 func runExec(logger *zap.Logger, database *sql.DB, nameOrID, command string) error {
-	vmID, err := lookupVM(database, nameOrID, "deleted", "error", "failed", "stopped", "maintenance")
+	machineID, err := lookupVM(database, nameOrID, "deleted", "error", "failed", "stopped", "maintenance")
 	if err != nil {
-		return fmt.Errorf("VM not found or not running: %s", nameOrID)
+		return fmt.Errorf("machine not found or not running: %s", nameOrID)
 	}
 	baseURL := daemon.URL()
-	result, err := daemon.Exec(baseURL, vmID, command, 120)
+	result, err := daemon.Exec(baseURL, machineID, command, 120)
 	if err != nil {
 		return fmt.Errorf("exec: %w", err)
 	}
@@ -74,12 +74,12 @@ func runExec(logger *zap.Logger, database *sql.DB, nameOrID, command string) err
 }
 
 func runTerminal(logger *zap.Logger, database *sql.DB, nameOrID string) error {
-	vmID, err := lookupVM(database, nameOrID, "deleted", "error", "failed", "stopped", "maintenance")
+	machineID, err := lookupVM(database, nameOrID, "deleted", "error", "failed", "stopped", "maintenance")
 	if err != nil {
-		return fmt.Errorf("VM not found or not running: %s", nameOrID)
+		return fmt.Errorf("machine not found or not running: %s", nameOrID)
 	}
 	baseURL := daemon.URL()
-	url := fmt.Sprintf("%s/terminals/vm/%s", baseURL, vmID)
+	url := fmt.Sprintf("%s/terminals/machine/%s", baseURL, machineID)
 	fmt.Printf("Open in your browser: %s\n", url)
 	openBrowser(url)
 	return nil

@@ -56,7 +56,7 @@ func TestDashboardAuth_PublicPaths(t *testing.T) {
 func TestDashboardAuth_APIKeyHeader(t *testing.T) {
 	mw := DashboardAuth(testAPIKey, []byte(testSecret), func() bool { return true })
 
-	req := httptest.NewRequest("GET", "/api/v1/vms", nil)
+	req := httptest.NewRequest("GET", "/api/v1/machines", nil)
 	req.Header.Set("X-API-Key", testAPIKey)
 	rr := runRequest(t, mw, req)
 	if rr.Code != 200 {
@@ -67,7 +67,7 @@ func TestDashboardAuth_APIKeyHeader(t *testing.T) {
 func TestDashboardAuth_APIKeyBearer(t *testing.T) {
 	mw := DashboardAuth(testAPIKey, []byte(testSecret), func() bool { return true })
 
-	req := httptest.NewRequest("GET", "/api/v1/vms", nil)
+	req := httptest.NewRequest("GET", "/api/v1/machines", nil)
 	req.Header.Set("Authorization", "Bearer "+testAPIKey)
 	rr := runRequest(t, mw, req)
 	if rr.Code != 200 {
@@ -79,7 +79,7 @@ func TestDashboardAuth_ValidJWT(t *testing.T) {
 	mw := DashboardAuth("", []byte(testSecret), func() bool { return true })
 
 	token := makeJWT(t, "admin", testSecret, time.Hour)
-	req := httptest.NewRequest("GET", "/api/v1/vms", nil)
+	req := httptest.NewRequest("GET", "/api/v1/machines", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rr := runRequest(t, mw, req)
 	if rr.Code != 200 {
@@ -91,7 +91,7 @@ func TestDashboardAuth_ExpiredJWT(t *testing.T) {
 	mw := DashboardAuth("", []byte(testSecret), func() bool { return true })
 
 	token := makeJWT(t, "admin", testSecret, -time.Hour) // expired
-	req := httptest.NewRequest("GET", "/api/v1/vms", nil)
+	req := httptest.NewRequest("GET", "/api/v1/machines", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rr := runRequest(t, mw, req)
 	if rr.Code != 401 {
@@ -103,7 +103,7 @@ func TestDashboardAuth_InvalidSignature(t *testing.T) {
 	mw := DashboardAuth("", []byte(testSecret), func() bool { return true })
 
 	token := makeJWT(t, "admin", "wrong-secret", time.Hour)
-	req := httptest.NewRequest("GET", "/api/v1/vms", nil)
+	req := httptest.NewRequest("GET", "/api/v1/machines", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	rr := runRequest(t, mw, req)
 	if rr.Code != 401 {
@@ -115,7 +115,7 @@ func TestDashboardAuth_NoAuthNoKeyNoAdmin(t *testing.T) {
 	// No API key, no admin → open mode (localhost dev)
 	mw := DashboardAuth("", []byte(testSecret), func() bool { return false })
 
-	req := httptest.NewRequest("GET", "/api/v1/vms", nil)
+	req := httptest.NewRequest("GET", "/api/v1/machines", nil)
 	rr := runRequest(t, mw, req)
 	if rr.Code != 200 {
 		t.Errorf("open mode: got %d, want 200", rr.Code)
@@ -126,7 +126,7 @@ func TestDashboardAuth_NoAuthButAdminExists(t *testing.T) {
 	// No API key, but admin exists → require JWT
 	mw := DashboardAuth("", []byte(testSecret), func() bool { return true })
 
-	req := httptest.NewRequest("GET", "/api/v1/vms", nil)
+	req := httptest.NewRequest("GET", "/api/v1/machines", nil)
 	rr := runRequest(t, mw, req)
 	if rr.Code != 401 {
 		t.Errorf("admin exists, no auth: got %d, want 401", rr.Code)
@@ -136,7 +136,7 @@ func TestDashboardAuth_NoAuthButAdminExists(t *testing.T) {
 func TestDashboardAuth_WrongAPIKey(t *testing.T) {
 	mw := DashboardAuth(testAPIKey, []byte(testSecret), func() bool { return true })
 
-	req := httptest.NewRequest("GET", "/api/v1/vms", nil)
+	req := httptest.NewRequest("GET", "/api/v1/machines", nil)
 	req.Header.Set("X-API-Key", "wrong-key")
 	rr := runRequest(t, mw, req)
 	if rr.Code != 401 {

@@ -6,11 +6,11 @@
 
   let {
     rule,
-    vmId,
+    machineId,
     ondelete,
   }: {
     rule: PortRule;
-    vmId: string;
+    machineId: string;
     ondelete: () => void;
   } = $props();
 
@@ -19,7 +19,7 @@
   async function handleDelete() {
     deleting = true;
     try {
-      await del(`/api/v1/vms/${vmId}/expose/${rule.host_port}`);
+      await del(`/api/v1/machines/${machineId}/expose/${rule.host_port}`);
       addToast('Port rule removed', 'success');
       ondelete();
     } catch (err) {
@@ -32,7 +32,7 @@
 
 <tr class="border-b border-border last:border-b-0">
   <td class="py-3 px-4 text-sm font-mono text-text">{rule.host_port}</td>
-  <td class="py-3 px-4 text-sm font-mono text-text">{rule.vm_port}</td>
+  <td class="py-3 px-4 text-sm font-mono text-text">{rule.machine_port}</td>
   <td class="py-3 px-4 text-sm text-muted uppercase">{rule.protocol}</td>
   <td class="py-3 px-4 text-right">
     <Button variant="danger" size="sm" loading={deleting} onclick={handleDelete}>Delete</Button>

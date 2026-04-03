@@ -29,8 +29,8 @@ func IsPortAvailable(port int, protocol string) bool {
 
 // PortRule describes a port forwarding rule.
 type PortRule struct {
-	VMID     string `json:"vm_id"`
-	HostPort int    `json:"host_port"`
-	VMPort   int    `json:"vm_port"`
-	Protocol string `json:"protocol"`
+	MachineID   string `json:"machine_id"`
+	HostPort    int    `json:"host_port"`
+	MachinePort int    `json:"machine_port"`
+	Protocol    string `json:"protocol"`
 }

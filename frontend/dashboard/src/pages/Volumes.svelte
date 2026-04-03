@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { VolumeInfo, VM } from '$lib/api/types';
+  import type { VolumeInfo, Machine } from '$lib/api/types';
   import { get, post, del } from '$lib/api/client';
   import { addToast } from '$lib/stores/toast.svelte';
   import { formatMB, timeAgo } from '$lib/utils/format';
@@ -11,7 +11,7 @@
   import Modal from '$lib/components/ui/Modal.svelte';
 
   let volumes = $state<VolumeInfo[]>([]);
-  let vms = $state<VM[]>([]);
+  let machines = $state<Machine[]>([]);
   let loading = $state(true);
   let error = $state<string | undefined>();
 
@@ -32,7 +32,7 @@
 
   // Attach
   let attachTarget = $state<VolumeInfo | null>(null);
-  let attachVmId = $state('');
+  let attachMachineId = $state('');
   let attaching = $state(false);
 
   // Detach
@@ -51,8 +51,8 @@
   // Show ALL volumes (including root — they're valuable storage users should see)
   let dataVolumes = $derived(volumes);
 
-  // Stopped VMs for attach dropdown
-  let stoppedVMs = $derived(vms.filter(v => v.status === 'stopped'));
+  // Stopped machines for attach dropdown
+  let stoppedMachines = $derived(machines.filter(v => v.status === 'stopped'));
 
   function statusToBadge(status: string): string {
     return status;
@@ -60,12 +60,12 @@
 
   async function fetchData() {
     try {
-      const [volData, vmData] = await Promise.all([
+      const [volData, machineData] = await Promise.all([
         get<{ volumes: VolumeInfo[] }>('/api/v1/volumes'),
-        get<{ vms: VM[] }>('/api/v1/vms'),
+        get<{ machines: Machine[] }>('/api/v1/machines'),
       ]);
       volumes = volData.volumes ?? [];
-      vms = vmData.vms ?? [];
+      machines = machineData.machines ?? [];
       if (loading) loading = false;
     } catch (err) {
       if (loading) {
@@ -149,17 +149,17 @@
   // --- Attach ---
   function openAttach(vol: VolumeInfo) {
     attachTarget = vol;
-    attachVmId = stoppedVMs.length > 0 ? stoppedVMs[0].id : '';
+    attachMachineId = stoppedMachines.length > 0 ? stoppedMachines[0].id : '';
   }
 
   async function handleAttach() {
-    if (!attachTarget || !attachVmId) return;
+    if (!attachTarget || !attachMachineId) return;
     attaching = true;
     try {
-      await post(`/api/v1/vms/${attachVmId}/volume/attach`, { volume: attachTarget.id });
+      await post(`/api/v1/machines/${attachMachineId}/volume/attach`, { volume: attachTarget.id });
       addToast(`Volume "${attachTarget.name}" attached`, 'success');
       attachTarget = null;
-      attachVmId = '';
+      attachMachineId = '';
       await fetchData();
     } catch (err) {
       addToast(err instanceof Error ? err.message : 'Failed to attach volume', 'error');
@@ -174,10 +174,10 @@
   }
 
   async function handleDetach() {
-    if (!detachTarget || !detachTarget.attached) return;
+    if (!detachTarget || !detachTarget.machine_id) return;
     detaching = true;
     try {
-      await post(`/api/v1/vms/${detachTarget.attached}/volume/detach`, { volume: detachTarget.id });
+      await post(`/api/v1/machines/${detachTarget.machine_id}/volume/detach`, { volume: detachTarget.id });
       addToast(`Volume "${detachTarget.name}" detached`, 'success');
       detachTarget = null;
       await fetchData();
@@ -188,9 +188,9 @@
     }
   }
 
-  function vmName(vmId: string): string {
-    const vm = vms.find(v => v.id === vmId);
-    return vm ? vm.name : vmId.slice(0, 8);
+  function machineName(machineId: string): string {
+    const machine = machines.find(v => v.id === machineId);
+    return machine ? machine.name : machineId.slice(0, 8);
   }
 </script>
 
@@ -253,7 +253,7 @@
   <!-- Volumes Table -->
   {#if dataVolumes.length === 0}
     <EmptyState
-      message="No volumes yet. Create one to persist data across VM restarts."
+      message="No volumes yet. Create one to persist data across machine restarts."
       action="Create Volume"
       onaction={() => { showCreate = true; }}
     />
@@ -279,13 +279,13 @@
                 <td class="px-4 py-3 text-muted text-sm">{formatMB(vol.size_mb)}</td>
                 <td class="px-4 py-3"><Badge status={statusToBadge(vol.status)} /></td>
                 <td class="px-4 py-3 text-sm">
-                  {#if vol.attached}
+                  {#if vol.machine_id}
                     <a
-                      href="#/vms/{vol.attached}"
+                      href="#/machines/{vol.machine_id}"
                       class="text-accent hover:underline"
                       onclick={(e: MouseEvent) => e.stopPropagation()}
                     >
-                      {vmName(vol.attached)}
+                      {machineName(vol.machine_id)}
                     </a>
                   {:else}
                     <span class="text-muted">-</span>
@@ -299,7 +299,7 @@
                       {#if vol.role === 'root'}
                         <Button variant="primary" size="sm" onclick={() => {
                           sessionStorage.setItem('sistemo_deploy_volume', vol.name);
-                          window.location.hash = '#/vms/create';
+                          window.location.hash = '#/machines/create';
                         }}>Deploy</Button>
                       {/if}
                       <Button variant="secondary" size="sm" onclick={() => openAttach(vol)}>Attach</Button>
@@ -361,20 +361,20 @@
   open={attachTarget !== null}
   title="Attach Volume"
   confirmText={attaching ? 'Attaching...' : 'Attach'}
-  onclose={() => { attachTarget = null; attachVmId = ''; }}
+  onclose={() => { attachTarget = null; attachMachineId = ''; }}
   onconfirm={handleAttach}
 >
   {#if attachTarget}
-    <p class="mb-3">Attach <strong class="text-text">{attachTarget.name}</strong> to a stopped VM:</p>
-    {#if stoppedVMs.length === 0}
-      <p class="text-warning text-sm">No stopped VMs available. Stop a VM first to attach a volume.</p>
+    <p class="mb-3">Attach <strong class="text-text">{attachTarget.name}</strong> to a stopped machine:</p>
+    {#if stoppedMachines.length === 0}
+      <p class="text-warning text-sm">No stopped machines available. Stop a machine first to attach a volume.</p>
     {:else}
       <select
-        bind:value={attachVmId}
+        bind:value={attachMachineId}
         class="w-full px-3 py-2 bg-surface-inner border border-border rounded-lg text-sm text-text focus:outline-none focus:border-accent"
       >
-        {#each stoppedVMs as vm}
-          <option value={vm.id}>{vm.name}</option>
+        {#each stoppedMachines as machine}
+          <option value={machine.id}>{machine.name}</option>
         {/each}
       </select>
     {/if}
@@ -390,6 +390,6 @@
   onconfirm={handleDetach}
 >
   {#if detachTarget}
-    <p>Detach <strong class="text-text">{detachTarget.name}</strong> from <strong class="text-text">{vmName(detachTarget.attached ?? '')}</strong>?</p>
+    <p>Detach <strong class="text-text">{detachTarget.name}</strong> from <strong class="text-text">{machineName(detachTarget.machine_id ?? '')}</strong>?</p>
   {/if}
 </Modal>

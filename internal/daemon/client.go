@@ -57,9 +57,9 @@ func checkResponse(resp *http.Response) error {
 	return nil
 }
 
-// CreateVMRequest is the JSON body for POST /vms.
-type CreateVMRequest struct {
-	VMID            string   `json:"vm_id,omitempty"`
+// CreateMachineRequest is the JSON body for POST /machines.
+type CreateMachineRequest struct {
+	MachineID       string   `json:"machine_id,omitempty"`
 	Name            string   `json:"name,omitempty"`
 	Image           string   `json:"image"`
 	VCPUs           int      `json:"vcpus"`
@@ -72,9 +72,9 @@ type CreateVMRequest struct {
 	NetworkSubnet   string   `json:"network_subnet,omitempty"`
 }
 
-// CreateVMResponse is the response from POST /vms.
-type CreateVMResponse struct {
-	VMID       string `json:"vm_id"`
+// CreateMachineResponse is the response from POST /machines.
+type CreateMachineResponse struct {
+	MachineID  string `json:"machine_id"`
 	Status     string `json:"status"`
 	IPAddress  string `json:"ip_address"`
 	Namespace  string `json:"namespace,omitempty"`
@@ -82,13 +82,13 @@ type CreateVMResponse struct {
 	SSHReady   bool   `json:"ssh_ready"`
 }
 
-// CreateVM calls POST /vms on the daemon.
-func CreateVM(baseURL string, req *CreateVMRequest) (*CreateVMResponse, error) {
+// CreateMachine calls POST /machines on the daemon.
+func CreateMachine(baseURL string, req *CreateMachineRequest) (*CreateMachineResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/vms", bytes.NewReader(body))
+	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/machines", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -101,20 +101,20 @@ func CreateVM(baseURL string, req *CreateVMRequest) (*CreateVMResponse, error) {
 	if err := checkResponse(resp); err != nil {
 		return nil, err
 	}
-	var out CreateVMResponse
+	var out CreateMachineResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return &out, nil
 }
 
-// DeleteVM calls DELETE /vms/{vmID} on the daemon.
-func DeleteVM(baseURL, vmID string, preserveStorage bool) (bool, error) {
+// DeleteMachine calls DELETE /machines/{machineID} on the daemon.
+func DeleteMachine(baseURL, machineID string, preserveStorage bool) (bool, error) {
 	ps := "false"
 	if preserveStorage {
 		ps = "true"
 	}
-	httpReq, err := http.NewRequest(http.MethodDelete, baseURL+"/vms/"+vmID+"?preserve_storage="+ps, nil)
+	httpReq, err := http.NewRequest(http.MethodDelete, baseURL+"/api/v1/machines/"+machineID+"?preserve_storage="+ps, nil)
 	if err != nil {
 		return false, err
 	}
@@ -132,9 +132,9 @@ func DeleteVM(baseURL, vmID string, preserveStorage bool) (bool, error) {
 	return true, nil
 }
 
-// StopVM calls POST /vms/{vmID}/stop on the daemon.
-func StopVM(baseURL, vmID string) (bool, error) {
-	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/vms/"+vmID+"/stop", nil)
+// StopMachine calls POST /machines/{machineID}/stop on the daemon.
+func StopMachine(baseURL, machineID string) (bool, error) {
+	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/machines/"+machineID+"/stop", nil)
 	if err != nil {
 		return false, err
 	}
@@ -152,9 +152,9 @@ func StopVM(baseURL, vmID string) (bool, error) {
 	return true, nil
 }
 
-// StartVM calls POST /vms/{vmID}/start on the daemon.
-func StartVM(baseURL, vmID string) (*CreateVMResponse, error) {
-	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/vms/"+vmID+"/start", nil)
+// StartMachine calls POST /machines/{machineID}/start on the daemon.
+func StartMachine(baseURL, machineID string) (*CreateMachineResponse, error) {
+	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/machines/"+machineID+"/start", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +166,7 @@ func StartVM(baseURL, vmID string) (*CreateVMResponse, error) {
 	if err := checkResponse(resp); err != nil {
 		return nil, err
 	}
-	var out CreateVMResponse
+	var out CreateMachineResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
@@ -190,18 +190,18 @@ func Health(baseURL string) error {
 	return nil
 }
 
-// ExposePort calls POST /vms/{vmID}/expose on the daemon.
-func ExposePort(baseURL, vmID string, hostPort, vmPort int, protocol string) error {
+// ExposePort calls POST /api/v1/machines/{machineID}/expose on the daemon.
+func ExposePort(baseURL, machineID string, hostPort, machinePort int, protocol string) error {
 	body := struct {
-		HostPort int    `json:"host_port"`
-		VMPort   int    `json:"vm_port"`
-		Protocol string `json:"protocol"`
-	}{HostPort: hostPort, VMPort: vmPort, Protocol: protocol}
+		HostPort    int    `json:"host_port"`
+		MachinePort int    `json:"machine_port"`
+		Protocol    string `json:"protocol"`
+	}{HostPort: hostPort, MachinePort: machinePort, Protocol: protocol}
 	data, err := json.Marshal(body)
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/vms/"+vmID+"/expose", bytes.NewReader(data))
+	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/machines/"+machineID+"/expose", bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -214,9 +214,9 @@ func ExposePort(baseURL, vmID string, hostPort, vmPort int, protocol string) err
 	return checkResponse(resp)
 }
 
-// UnexposePort calls DELETE /vms/{vmID}/expose/{hostPort} on the daemon.
-func UnexposePort(baseURL, vmID string, hostPort int) error {
-	httpReq, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/vms/%s/expose/%d", baseURL, vmID, hostPort), nil)
+// UnexposePort calls DELETE /machines/{machineID}/expose/{hostPort} on the daemon.
+func UnexposePort(baseURL, machineID string, hostPort int) error {
+	httpReq, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/v1/machines/%s/expose/%d", baseURL, machineID, hostPort), nil)
 	if err != nil {
 		return err
 	}
@@ -239,7 +239,7 @@ func CreateNetwork(baseURL, name, subnet, bridgeName string) error {
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/networks", bytes.NewReader(data))
+	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/networks", bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -254,7 +254,7 @@ func CreateNetwork(baseURL, name, subnet, bridgeName string) error {
 
 // DeleteNetwork calls DELETE /networks/{name} on the daemon.
 func DeleteNetwork(baseURL, name string) error {
-	httpReq, err := http.NewRequest(http.MethodDelete, baseURL+"/networks/"+name, nil)
+	httpReq, err := http.NewRequest(http.MethodDelete, baseURL+"/api/v1/networks/"+name, nil)
 	if err != nil {
 		return err
 	}
@@ -269,15 +269,15 @@ func DeleteNetwork(baseURL, name string) error {
 	return nil
 }
 
-// ExecResult is the response from POST /vms/{id}/exec.
+// ExecResult is the response from POST /machines/{id}/exec.
 type ExecResult struct {
 	ExitCode int    `json:"exit_code"`
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
 }
 
-// Exec calls POST /vms/{vmID}/exec with the given script.
-func Exec(baseURL, vmID, script string, timeoutSec int) (*ExecResult, error) {
+// Exec calls POST /machines/{machineID}/exec with the given script.
+func Exec(baseURL, machineID, script string, timeoutSec int) (*ExecResult, error) {
 	if timeoutSec <= 0 {
 		timeoutSec = 30
 	}
@@ -289,7 +289,7 @@ func Exec(baseURL, vmID, script string, timeoutSec int) (*ExecResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/vms/"+vmID+"/exec", bytes.NewReader(data))
+	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/machines/"+machineID+"/exec", bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +317,7 @@ type VolumeResponse struct {
 	Path            string `json:"path"`
 	Status          string `json:"status"`
 	Role            string `json:"role,omitempty"`
-	Attached        string `json:"attached,omitempty"`
+	MachineID       string `json:"machine_id,omitempty"`
 	Created         string `json:"created,omitempty"`
 	LastStateChange string `json:"last_state_change,omitempty"`
 }
@@ -332,7 +332,7 @@ func CreateVolume(baseURL string, sizeMB int, name string) (*VolumeResponse, err
 	if err != nil {
 		return nil, err
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/volumes", bytes.NewReader(data))
+	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/volumes", bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
@@ -354,7 +354,7 @@ func CreateVolume(baseURL string, sizeMB int, name string) (*VolumeResponse, err
 
 // ListVolumes calls GET /volumes on the daemon.
 func ListVolumes(baseURL string) ([]VolumeResponse, error) {
-	httpReq, err := http.NewRequest(http.MethodGet, baseURL+"/volumes", nil)
+	httpReq, err := http.NewRequest(http.MethodGet, baseURL+"/api/v1/volumes", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +375,7 @@ func ListVolumes(baseURL string) ([]VolumeResponse, error) {
 
 // GetVolume calls GET /volumes/{idOrName} on the daemon.
 func GetVolume(baseURL, idOrName string) (*VolumeResponse, error) {
-	httpReq, err := http.NewRequest(http.MethodGet, baseURL+"/volumes/"+idOrName, nil)
+	httpReq, err := http.NewRequest(http.MethodGet, baseURL+"/api/v1/volumes/"+idOrName, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +396,7 @@ func GetVolume(baseURL, idOrName string) (*VolumeResponse, error) {
 
 // DeleteVolume calls DELETE /volumes/{idOrName} on the daemon.
 func DeleteVolume(baseURL, idOrName string) error {
-	httpReq, err := http.NewRequest(http.MethodDelete, baseURL+"/volumes/"+idOrName, nil)
+	httpReq, err := http.NewRequest(http.MethodDelete, baseURL+"/api/v1/volumes/"+idOrName, nil)
 	if err != nil {
 		return err
 	}
@@ -417,7 +417,7 @@ func ResizeVolume(baseURL, idOrName string, sizeMB int) error {
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/volumes/"+idOrName+"/resize", bytes.NewReader(data))
+	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/volumes/"+idOrName+"/resize", bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -430,8 +430,8 @@ func ResizeVolume(baseURL, idOrName string, sizeMB int) error {
 	return checkResponse(resp)
 }
 
-// AttachVolume calls POST /vms/{vmID}/volume/attach on the daemon.
-func AttachVolume(baseURL, vmID, volumeIDOrName string) error {
+// AttachVolume calls POST /machines/{machineID}/volume/attach on the daemon.
+func AttachVolume(baseURL, machineID, volumeIDOrName string) error {
 	body := struct {
 		Volume string `json:"volume"`
 	}{Volume: volumeIDOrName}
@@ -439,7 +439,7 @@ func AttachVolume(baseURL, vmID, volumeIDOrName string) error {
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/vms/%s/volume/attach", baseURL, vmID), bytes.NewReader(data))
+	httpReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/api/v1/machines/%s/volume/attach", baseURL, machineID), bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -452,8 +452,8 @@ func AttachVolume(baseURL, vmID, volumeIDOrName string) error {
 	return checkResponse(resp)
 }
 
-// DetachVolume calls POST /vms/{vmID}/volume/detach on the daemon.
-func DetachVolume(baseURL, vmID, volumeIDOrName string) error {
+// DetachVolume calls POST /machines/{machineID}/volume/detach on the daemon.
+func DetachVolume(baseURL, machineID, volumeIDOrName string) error {
 	body := struct {
 		Volume string `json:"volume"`
 	}{Volume: volumeIDOrName}
@@ -461,7 +461,7 @@ func DetachVolume(baseURL, vmID, volumeIDOrName string) error {
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/vms/%s/volume/detach", baseURL, vmID), bytes.NewReader(data))
+	httpReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/api/v1/machines/%s/volume/detach", baseURL, machineID), bytes.NewReader(data))
 	if err != nil {
 		return err
 	}

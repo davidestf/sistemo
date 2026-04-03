@@ -285,7 +285,7 @@ func downloadAndExtractFirecracker(url, destBin, version, arch string) error {
 	return nil
 }
 
-// lookupVM resolves a VM name or ID to its UUID. Returns the VM ID or an error.
+// lookupVM resolves a machine name or ID to its UUID. Returns the machine ID or an error.
 // excludeStatuses lists statuses to exclude from the lookup (e.g. "deleted", "error", "failed").
 func lookupVM(database *sql.DB, nameOrID string, excludeStatuses ...string) (string, error) {
 	if len(excludeStatuses) == 0 {
@@ -298,16 +298,16 @@ func lookupVM(database *sql.DB, nameOrID string, excludeStatuses ...string) (str
 		args = append(args, s)
 	}
 	query := fmt.Sprintf(
-		"SELECT id FROM vm WHERE (id = ? OR name = ?) AND status NOT IN (%s) LIMIT 1",
+		"SELECT id FROM machine WHERE (id = ? OR name = ?) AND status NOT IN (%s) LIMIT 1",
 		strings.Join(placeholders, ", "),
 	)
-	var vmID string
-	err := database.QueryRow(query, args...).Scan(&vmID)
+	var machineID string
+	err := database.QueryRow(query, args...).Scan(&machineID)
 	if err == sql.ErrNoRows {
-		return "", fmt.Errorf("VM not found: %s", nameOrID)
+		return "", fmt.Errorf("machine not found: %s", nameOrID)
 	}
 	if err != nil {
-		return "", fmt.Errorf("lookup vm: %w", err)
+		return "", fmt.Errorf("lookup machine: %w", err)
 	}
-	return vmID, nil
+	return machineID, nil
 }
