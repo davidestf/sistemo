@@ -320,12 +320,12 @@ func (p *MachineProvisioner) finalize(result *machine.CreateResponse, state *pro
 
 	// Link image digest for provenance tracking
 	var imageDigest string
-	p.db.QueryRow("SELECT digest FROM image WHERE path = ?", req.Image).Scan(&imageDigest)
+	_ = p.db.QueryRow("SELECT digest FROM image WHERE path = ?", req.Image).Scan(&imageDigest)
 	if imageDigest == "" {
 		imgName := filepath.Base(req.Image)
 		imgName = strings.TrimSuffix(imgName, ".rootfs.ext4")
 		imgName = strings.TrimSuffix(imgName, ".ext4")
-		p.db.QueryRow("SELECT digest FROM image WHERE name = ? LIMIT 1", imgName).Scan(&imageDigest)
+		_ = p.db.QueryRow("SELECT digest FROM image WHERE name = ? LIMIT 1", imgName).Scan(&imageDigest)
 	}
 	if imageDigest != "" {
 		db.SafeExec(p.db, "UPDATE machine SET image_digest=? WHERE id=?", imageDigest, state.machineID)

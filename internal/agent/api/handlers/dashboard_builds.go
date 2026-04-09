@@ -266,7 +266,7 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 					return
 				default:
 				}
-				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			})
 		})
 
@@ -568,7 +568,7 @@ func (h *DashboardAPI) DockerfileBuild(w http.ResponseWriter, r *http.Request) {
 					return
 				default:
 				}
-				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			})
 		})
 
@@ -745,13 +745,13 @@ func (h *DashboardAPI) ImageBuildCancel(w http.ResponseWriter, r *http.Request) 
 	cmd, ok := activeBuildsMap[buildID]
 	if ok && cmd.Process != nil {
 		pid := cmd.Process.Pid
-		syscall.Kill(-pid, syscall.SIGTERM)
+		_ = syscall.Kill(-pid, syscall.SIGTERM)
 		h.logger.Info("sent SIGTERM to build process group", zap.String("build_id", buildID), zap.Int("pid", pid))
 		go func() {
 			time.Sleep(10 * time.Second)
 			activeBuildsMu.Lock()
 			if _, still := activeBuildsMap[buildID]; still && cmd.Process != nil {
-				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 				h.logger.Info("sent SIGKILL to build process group", zap.String("build_id", buildID))
 			}
 			activeBuildsMu.Unlock()

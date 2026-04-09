@@ -28,7 +28,7 @@ func (e *ExitError) Error() string {
 
 // generateSSHKeyWithLock generates an SSH key at keyPath using flock to prevent races.
 func generateSSHKeyWithLock(sshDir, keyPath string) error {
-	os.MkdirAll(sshDir, 0700)
+	_ = os.MkdirAll(sshDir, 0700)
 	lockPath := keyPath + ".lock"
 	lockFile, err := os.Create(lockPath)
 	if err != nil {

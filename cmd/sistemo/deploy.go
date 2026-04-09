@@ -422,7 +422,7 @@ func runBuild(logger *zap.Logger, dataDir, image, outPath string) error {
 
 	// Use ~/.sistemo/tmp/ for builds instead of /tmp (which may be RAM-backed tmpfs).
 	buildTmpBase := filepath.Join(dataDir, "tmp")
-	os.MkdirAll(buildTmpBase, 0755)
+	_ = os.MkdirAll(buildTmpBase, 0755)
 	tmpDir, err := os.MkdirTemp(buildTmpBase, "build-*")
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
