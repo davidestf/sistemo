@@ -265,7 +265,7 @@ func killProcessGroup(pid int, machineID string, logger *zap.Logger) bool {
 	}
 
 	logger.Info("process still alive after 5s, sending SIGKILL", zap.Int("pid", pid))
-	syscall.Kill(pgid, syscall.SIGKILL)
+	_ = syscall.Kill(pgid, syscall.SIGKILL)
 
 	if !processExists(pid) {
 		return true

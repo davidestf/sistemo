@@ -62,6 +62,6 @@ func DashboardHandler() http.HandlerFunc {
 		// SPA fallback: serve index.html for all non-file routes
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		w.Write(indexHTML)
+		_, _ = w.Write(indexHTML)
 	}
 }

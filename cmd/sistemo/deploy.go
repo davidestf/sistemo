@@ -105,7 +105,7 @@ func resolveImage(logger *zap.Logger, dataDir, image string) (string, error) {
 	// 4. Download from registry
 	// On ARM64: try debian-arm64.rootfs.ext4.gz first, fall back to debian.rootfs.ext4.gz
 	imagesDir := filepath.Join(dataDir, "images")
-	os.MkdirAll(imagesDir, 0755)
+	_ = os.MkdirAll(imagesDir, 0755)
 	dest := filepath.Join(imagesDir, image+".rootfs.ext4")
 	suffix := archSuffix()
 	// Don't double the suffix if the image name already includes it (e.g. "debian-arm64")
@@ -416,7 +416,7 @@ func runBuild(logger *zap.Logger, dataDir, image, outPath string) error {
 		}
 		// Save to ~/.sistemo/images/ so 'sistemo vm deploy <name>' finds it automatically
 		imagesDir := filepath.Join(dataDir, "images")
-		os.MkdirAll(imagesDir, 0755)
+		_ = os.MkdirAll(imagesDir, 0755)
 		outPath = filepath.Join(imagesDir, base+".rootfs.ext4")
 	}
 

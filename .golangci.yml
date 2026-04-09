@@ -27,6 +27,7 @@ linters:
         - G703  # Path traversal — internal paths derived from config
         - G302  # File permissions 0755 — needed for executable binaries
         - G104  # Errors unhandled — covered by errcheck linter instead
+        - G705  # XSS false positive — embedded static assets, not user input
 
   exclusions:
     # Enable standard false-positive exclusion presets

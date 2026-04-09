@@ -259,7 +259,7 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 			h.logger.Warn("build timeout reached, killing", zap.String("build_id", buildID), zap.Int("timeout_min", timeoutMin))
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 			time.AfterFunc(10*time.Second, func() {
 				select {
 				case <-buildDone:
@@ -561,7 +561,7 @@ func (h *DashboardAPI) DockerfileBuild(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 			h.logger.Warn("build timeout reached, killing", zap.String("build_id", buildID))
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 			time.AfterFunc(10*time.Second, func() {
 				select {
 				case <-buildDone:

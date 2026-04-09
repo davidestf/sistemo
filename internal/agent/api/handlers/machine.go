@@ -103,7 +103,7 @@ func (h *Machine) Delete(w http.ResponseWriter, r *http.Request) {
 	// Look up root volume before delete (vm_spec files will be removed)
 	var rootVolID sql.NullString
 	if h.db != nil {
-		h.db.QueryRow("SELECT root_volume FROM machine WHERE id=?", machineID).Scan(&rootVolID)
+		_ = h.db.QueryRow("SELECT root_volume FROM machine WHERE id=?", machineID).Scan(&rootVolID)
 	}
 
 	_, err := h.mgr.Delete(r.Context(), machineID, preserveStorage)
