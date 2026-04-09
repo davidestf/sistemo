@@ -16,14 +16,14 @@ func IsPortAvailable(port int, protocol string) bool {
 		if err != nil {
 			return false
 		}
-		ln.Close()
+		_ = ln.Close()
 		return true
 	}
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		return false
 	}
-	ln.Close()
+	_ = ln.Close()
 	return true
 }
 

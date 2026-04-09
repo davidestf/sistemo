@@ -220,7 +220,7 @@ func migrateExistingImages(db *sql.DB, dataDir string) {
 				builtNames[name] = true
 			}
 		}
-		rows.Close()
+		_ = rows.Close()
 		if err := rows.Err(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: error reading image builds: %v\n", err)
 		}
@@ -300,7 +300,7 @@ func migrateExistingImages(db *sql.DB, dataDir string) {
 				refs = append(refs, r)
 			}
 		}
-		vmRows.Close()
+		_ = vmRows.Close()
 		if err := vmRows.Err(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: error reading machines for image backfill: %v\n", err)
 		}
@@ -338,7 +338,7 @@ func migrateExistingImages(db *sql.DB, dataDir string) {
 				brefs = append(brefs, b)
 			}
 		}
-		buildRows.Close()
+		_ = buildRows.Close()
 		if err := buildRows.Err(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: error reading builds for digest backfill: %v\n", err)
 		}
@@ -355,7 +355,7 @@ func migrateExistingImages(db *sql.DB, dataDir string) {
 	}
 
 	// Write sentinel file.
-	os.WriteFile(sentinel, []byte(fmt.Sprintf("migrated %d images\n", count)), 0644)
+	_ = os.WriteFile(sentinel, []byte(fmt.Sprintf("migrated %d images\n", count)), 0644)
 	if count > 0 {
 		fmt.Fprintf(os.Stderr, "migrated %d images to content-addressable store (sha256)\n", count)
 	}
@@ -410,32 +410,32 @@ func runMigrations(db *sql.DB) error {
 		tx, err := db.Begin()
 		if err != nil {
 			if needsFKOff {
-				db.Exec("PRAGMA foreign_keys = ON")
+				_, _ = db.Exec("PRAGMA foreign_keys = ON")
 			}
 			return fmt.Errorf("begin migration %s: %w", name, err)
 		}
 		if _, err := tx.Exec(string(body)); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			if needsFKOff {
-				db.Exec("PRAGMA foreign_keys = ON")
+				_, _ = db.Exec("PRAGMA foreign_keys = ON")
 			}
 			return fmt.Errorf("migration %s: %w", name, err)
 		}
 		if _, err := tx.Exec("INSERT INTO schema_migration (name) VALUES (?)", name); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			if needsFKOff {
-				db.Exec("PRAGMA foreign_keys = ON")
+				_, _ = db.Exec("PRAGMA foreign_keys = ON")
 			}
 			return fmt.Errorf("record migration %s: %w", name, err)
 		}
 		if err := tx.Commit(); err != nil {
 			if needsFKOff {
-				db.Exec("PRAGMA foreign_keys = ON")
+				_, _ = db.Exec("PRAGMA foreign_keys = ON")
 			}
 			return fmt.Errorf("commit migration %s: %w", name, err)
 		}
 		if needsFKOff {
-			db.Exec("PRAGMA foreign_keys = ON")
+			_, _ = db.Exec("PRAGMA foreign_keys = ON")
 			// Verify FK integrity after table rebuild — check all violations
 			fkRows, fkErr := db.Query("PRAGMA foreign_key_check")
 			if fkErr == nil {
@@ -445,7 +445,7 @@ func runMigrations(db *sql.DB) error {
 						fmt.Fprintf(os.Stderr, "warning: FK violation after migration %s: table=%s row=%s parent=%s\n", name, table, rowid, parent)
 					}
 				}
-				fkRows.Close()
+				_ = fkRows.Close()
 			}
 		}
 	}

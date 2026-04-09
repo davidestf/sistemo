@@ -470,7 +470,7 @@ func (fw *NftFirewall) deleteRulesInChain(family, table, chain, comment string) 
 	for _, r := range rules {
 		if r.Comment == comment {
 			delCmd := exec.Command("nft", "delete", "rule", family, table, chain, "handle", fmt.Sprintf("%d", r.Handle))
-			delCmd.CombinedOutput()
+			_, _ = delCmd.CombinedOutput()
 		}
 	}
 }
@@ -489,7 +489,7 @@ func (fw *NftFirewall) deleteRulesInChainByPrefix(family, table, chain, prefix s
 	for _, r := range rules {
 		if strings.HasPrefix(r.Comment, prefix) {
 			delCmd := exec.Command("nft", "delete", "rule", family, table, chain, "handle", fmt.Sprintf("%d", r.Handle))
-			delCmd.CombinedOutput()
+			_, _ = delCmd.CombinedOutput()
 		}
 	}
 }

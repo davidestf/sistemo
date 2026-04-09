@@ -26,7 +26,7 @@ func AllocateIP(db *sql.DB, machineID string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.Query("SELECT ip FROM ip_allocation ORDER BY ip")
 	if err != nil {
@@ -112,7 +112,7 @@ func AllocateIPInSubnet(db *sql.DB, machineID, cidr string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.Query("SELECT ip FROM ip_allocation ORDER BY ip")
 	if err != nil {

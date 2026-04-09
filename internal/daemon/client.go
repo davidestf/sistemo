@@ -110,7 +110,7 @@ func CreateMachine(baseURL string, req *CreateMachineRequest) (*CreateMachineRes
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := checkResponse(resp); err != nil {
 		return nil, err
 	}
@@ -135,7 +135,7 @@ func DeleteMachine(baseURL, machineID string, preserveStorage bool) (bool, error
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return false, nil
 	}
@@ -155,7 +155,7 @@ func StopMachine(baseURL, machineID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return false, nil
 	}
@@ -175,7 +175,7 @@ func StartMachine(baseURL, machineID string) (*CreateMachineResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := checkResponse(resp); err != nil {
 		return nil, err
 	}
@@ -196,7 +196,7 @@ func Health(baseURL string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("health returned %d", resp.StatusCode)
 	}
@@ -223,7 +223,7 @@ func ExposePort(baseURL, machineID string, hostPort, machinePort int, protocol s
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return checkResponse(resp)
 }
 
@@ -237,7 +237,7 @@ func UnexposePort(baseURL, machineID string, hostPort int) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return checkResponse(resp)
 }
 
@@ -261,7 +261,7 @@ func CreateNetwork(baseURL, name, subnet, bridgeName string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return checkResponse(resp)
 }
 
@@ -275,7 +275,7 @@ func DeleteNetwork(baseURL, name string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
 		return checkResponse(resp)
 	}
@@ -311,7 +311,7 @@ func Exec(baseURL, machineID, script string, timeoutSec int) (*ExecResult, error
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := checkResponse(resp); err != nil {
 		return nil, err
 	}
@@ -354,7 +354,7 @@ func CreateVolume(baseURL string, sizeMB int, name string) (*VolumeResponse, err
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := checkResponse(resp); err != nil {
 		return nil, err
 	}
@@ -375,7 +375,7 @@ func ListVolumes(baseURL string) ([]VolumeResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := checkResponse(resp); err != nil {
 		return nil, err
 	}
@@ -396,7 +396,7 @@ func GetVolume(baseURL, idOrName string) (*VolumeResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := checkResponse(resp); err != nil {
 		return nil, err
 	}
@@ -417,7 +417,7 @@ func DeleteVolume(baseURL, idOrName string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return checkResponse(resp)
 }
 
@@ -439,7 +439,7 @@ func ResizeVolume(baseURL, idOrName string, sizeMB int) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return checkResponse(resp)
 }
 
@@ -461,7 +461,7 @@ func AttachVolume(baseURL, machineID, volumeIDOrName string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return checkResponse(resp)
 }
 
@@ -483,6 +483,6 @@ func DetachVolume(baseURL, machineID, volumeIDOrName string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return checkResponse(resp)
 }

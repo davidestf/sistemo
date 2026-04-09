@@ -87,7 +87,7 @@ func LaunchInNamespace(vmBaseDir string, vmID string, firecrackerBin string, cfg
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
-		logFile.Close()
+		_ = logFile.Close()
 		return 0, fmt.Errorf("failed to start firecracker: %v", err)
 	}
 
@@ -95,8 +95,8 @@ func LaunchInNamespace(vmBaseDir string, vmID string, firecrackerBin string, cfg
 	logger.Info("Firecracker process started", zap.Int("pid", pid))
 
 	go func() {
-		cmd.Wait()
-		logFile.Close()
+		_ = cmd.Wait()
+		_ = logFile.Close()
 	}()
 
 	// Poll until the API socket appears or the process dies.

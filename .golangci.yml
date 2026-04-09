@@ -11,3 +11,26 @@ linters:
     - errcheck
     - gosec
     - bodyclose
+
+  settings:
+    gosec:
+      excludes:
+        - G115  # Integer conversions for IP byte manipulation — values are bounded
+        - G204  # Subprocess with validated arguments — this is a VM management tool
+        - G304  # File paths from internal config, not user input
+        - G301  # Directory permissions 0755 — standard for data dirs
+        - G306  # File permissions 0644 — appropriate for config/pid/log files
+        - G704  # SSRF false positives — daemon client talks to localhost
+        - G201  # SQL formatting — uses parameterized placeholders
+        - G122  # filepath.Walk TOCTOU — acceptable for chown during install
+        - G703  # Path traversal — internal paths derived from config
+
+  exclusions:
+    # Enable standard false-positive exclusion presets
+    presets:
+      - std-error-handling  # Excludes common Close/Flush/Write error checks
+      - common-false-positives
+    rules:
+      # Don't enforce errcheck in test files
+      - linters: [errcheck]
+        path: _test\.go
