@@ -50,7 +50,7 @@ func deleteMachine(ctx context.Context, m *Manager, machineID string, preserveSt
 	}
 	if nsName != "" {
 		ns := &network.VMNetwork{NamespaceName: nsName, Logger: m.logger}
-		ns.Cleanup(m.cfg.HostInterface)
+		_ = ns.Cleanup(m.cfg.HostInterface)
 	}
 	log.Info("phase: namespace_cleanup", zap.Duration("elapsed", time.Since(t)))
 
@@ -155,7 +155,7 @@ func stopMachine(ctx context.Context, m *Manager, machineID string) (bool, error
 	}
 	if nsName != "" {
 		ns := &network.VMNetwork{NamespaceName: nsName, Logger: m.logger}
-		ns.Cleanup(m.cfg.HostInterface)
+		_ = ns.Cleanup(m.cfg.HostInterface)
 	}
 
 	m.unregisterMachine(machineID)
@@ -250,7 +250,7 @@ func killProcessGroup(pid int, machineID string, logger *zap.Logger) bool {
 
 	pgid := -pid
 	logger.Info("sending SIGTERM to process group", zap.Int("pid", pid))
-	syscall.Kill(pgid, syscall.SIGTERM)
+	_ = syscall.Kill(pgid, syscall.SIGTERM)
 
 	// Check immediately — most processes die within milliseconds
 	if !processExists(pid) {
@@ -265,7 +265,7 @@ func killProcessGroup(pid int, machineID string, logger *zap.Logger) bool {
 	}
 
 	logger.Info("process still alive after 5s, sending SIGKILL", zap.Int("pid", pid))
-	syscall.Kill(pgid, syscall.SIGKILL)
+	_ = syscall.Kill(pgid, syscall.SIGKILL)
 
 	if !processExists(pid) {
 		return true
@@ -277,7 +277,11 @@ func killProcessGroup(pid int, machineID string, logger *zap.Logger) bool {
 			return true
 		}
 	}
-	return !processExists(pid)
+	alive := processExists(pid)
+	if alive {
+		logger.Warn("process still alive after SIGKILL, may be in uninterruptible state (zombie)", zap.Int("pid", pid))
+	}
+	return !alive
 }
 
 func isFirecrackerProcess(pid int, machineID string) bool {

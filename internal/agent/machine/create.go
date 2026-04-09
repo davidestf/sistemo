@@ -86,7 +86,7 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 	net := network.NewVMNetwork(req.MachineID, machineIP, m.logger, req.NetworkBridge)
 	net.BlockSMTP = m.cfg.BlockSMTP
 	if err := net.Create(); err != nil {
-		network.ReleaseIP(m.db, req.MachineID)
+		_ = network.ReleaseIP(m.db, req.MachineID)
 		return nil, fmt.Errorf("failed to create network namespace: %v", err)
 	}
 	log.Info("phase: network_setup", zap.Duration("elapsed", time.Since(t)), zap.String("machine_ip", machineIP))
@@ -97,8 +97,8 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 
 	// cleanup releases network and IP on error
 	cleanup := func() {
-		net.Cleanup(m.cfg.HostInterface)
-		network.ReleaseIP(m.db, req.MachineID)
+		_ = net.Cleanup(m.cfg.HostInterface)
+		_ = network.ReleaseIP(m.db, req.MachineID)
 	}
 
 	// Pre-flight disk space check
@@ -241,13 +241,13 @@ func createFresh(ctx context.Context, m *Manager, req *CreateRequest, startTime 
 		req.BandwidthMbps, req.UploadMbps, req.DiskIOPS, req.DiskBWMbps}
 	specData, err := json.Marshal(spec)
 	if err != nil {
-		syscall.Kill(-pid, syscall.SIGKILL) // kill orphaned Firecracker process
+		_ = syscall.Kill(-pid, syscall.SIGKILL) // kill orphaned Firecracker process
 		os.RemoveAll(machineDir)
 		cleanup()
 		return nil, fmt.Errorf("marshal vm_spec: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(machineDir, "vm_spec.json"), specData, 0644); err != nil {
-		syscall.Kill(-pid, syscall.SIGKILL) // kill orphaned Firecracker process
+		_ = syscall.Kill(-pid, syscall.SIGKILL) // kill orphaned Firecracker process
 		os.RemoveAll(machineDir)
 		cleanup()
 		return nil, fmt.Errorf("write vm_spec.json: %w", err)
@@ -483,7 +483,7 @@ func downloadFromURL(rawurl, dest string) (string, *string, error) {
 			return dest, nil, nil
 		}
 	}
-	os.MkdirAll(filepath.Dir(dest), 0755)
+	_ = os.MkdirAll(filepath.Dir(dest), 0755)
 
 	var lastErr error
 	for attempt := 0; attempt < agent.DefaultMaxDownloadRetries; attempt++ {
@@ -619,7 +619,7 @@ func startMachine(ctx context.Context, m *Manager, machineID string) (*CreateRes
 	net.BlockSMTP = m.cfg.BlockSMTP
 	if err := net.Create(); err != nil {
 		if freshlyAllocated {
-			network.ReleaseIP(m.db, machineID)
+			_ = network.ReleaseIP(m.db, machineID)
 		}
 		return nil, fmt.Errorf("failed to create network namespace: %v", err)
 	}
@@ -687,9 +687,9 @@ func startMachine(ctx context.Context, m *Manager, machineID string) (*CreateRes
 	t = time.Now()
 	pid, err := firecracker.LaunchInNamespace(m.cfg.VMBaseDir, machineID, m.cfg.FirecrackerBin, cfg, net.NamespaceName, vcpus, memoryMB, m.logger)
 	if err != nil {
-		net.Cleanup(m.cfg.HostInterface)
+		_ = net.Cleanup(m.cfg.HostInterface)
 		if freshlyAllocated {
-			network.ReleaseIP(m.db, machineID)
+			_ = network.ReleaseIP(m.db, machineID)
 		}
 		return nil, fmt.Errorf("failed to launch firecracker: %v", err)
 	}

@@ -103,7 +103,7 @@ func (h *Machine) Delete(w http.ResponseWriter, r *http.Request) {
 	// Look up root volume before delete (vm_spec files will be removed)
 	var rootVolID sql.NullString
 	if h.db != nil {
-		h.db.QueryRow("SELECT root_volume FROM machine WHERE id=?", machineID).Scan(&rootVolID)
+		_ = h.db.QueryRow("SELECT root_volume FROM machine WHERE id=?", machineID).Scan(&rootVolID)
 	}
 
 	_, err := h.mgr.Delete(r.Context(), machineID, preserveStorage)
@@ -126,7 +126,7 @@ func (h *Machine) Delete(w http.ResponseWriter, r *http.Request) {
 	// If user already detached it, leave it alone (it belongs to them now).
 	if h.db != nil && rootVolID.Valid {
 		var volAttached sql.NullString
-		h.db.QueryRow("SELECT machine_id FROM volume WHERE id=?", rootVolID.String).Scan(&volAttached)
+		_ = h.db.QueryRow("SELECT machine_id FROM volume WHERE id=?", rootVolID.String).Scan(&volAttached)
 		stillAttached := volAttached.Valid && volAttached.String == machineID
 
 		if stillAttached && !preserveStorage {
@@ -197,7 +197,7 @@ func (h *Machine) Start(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	if h.db != nil {
 		var currentStatus string
-		h.db.QueryRow("SELECT status FROM machine WHERE id = ?", machineID).Scan(&currentStatus)
+		_ = h.db.QueryRow("SELECT status FROM machine WHERE id = ?", machineID).Scan(&currentStatus)
 		if currentStatus == "running" || currentStatus == "maintenance" {
 			writeError(w, http.StatusConflict, fmt.Sprintf("machine is already %s", currentStatus))
 			return
@@ -288,13 +288,15 @@ func (h *Machine) Logs(w http.ResponseWriter, r *http.Request) {
 
 	// Stream the last 1MB if file is larger
 	const maxBytes = 1 << 20 // 1MB
-	info, _ := f.Stat()
-	if info != nil && info.Size() > maxBytes {
-		f.Seek(-maxBytes, io.SeekEnd)
+	info, err := f.Stat()
+	if err == nil && info.Size() > maxBytes {
+		if _, seekErr := f.Seek(-maxBytes, io.SeekEnd); seekErr != nil {
+			h.logger.Warn("seek log file failed, streaming from beginning", zap.Error(seekErr))
+		}
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	io.Copy(w, f)
+	_, _ = io.Copy(w, f)
 }
 
 // Expose handles POST /machines/{machineID}/expose — adds a port forwarding rule.

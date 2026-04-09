@@ -26,7 +26,7 @@ func DashboardHandler() http.HandlerFunc {
 		if path == "" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-			w.Write(indexHTML)
+			_, _ = w.Write(indexHTML)
 			return
 		}
 
@@ -55,13 +55,13 @@ func DashboardHandler() http.HandlerFunc {
 				w.Header().Set("Content-Type", "application/json")
 			}
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-			w.Write(f)
+			_, _ = w.Write(f)
 			return
 		}
 
 		// SPA fallback: serve index.html for all non-file routes
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		w.Write(indexHTML)
+		_, _ = w.Write(indexHTML)
 	}
 }

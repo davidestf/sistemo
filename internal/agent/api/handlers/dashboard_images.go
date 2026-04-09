@@ -121,9 +121,9 @@ func (h *DashboardAPI) Images(w http.ResponseWriter, r *http.Request) {
 		if d, err := db.HashFile(path); err == nil {
 			digest = d
 			now := time.Now().UTC().Format(time.RFC3339)
-			h.db.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'unknown', ?, ?)",
+			_, _ = h.db.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'unknown', ?, ?)",
 				digest, name, e.Name(), path, info.Size(), now, now)
-			h.db.Exec("INSERT OR IGNORE INTO image_tag (tag, digest) VALUES (?, ?)", name, digest)
+			_, _ = h.db.Exec("INSERT OR IGNORE INTO image_tag (tag, digest) VALUES (?, ?)", name, digest)
 		}
 
 		images = append(images, imageEntry{
@@ -182,7 +182,7 @@ func (h *DashboardAPI) ImageDelete(w http.ResponseWriter, r *http.Request) {
 
 	// Remove from image table (image_tag rows cascade-deleted)
 	if h.db != nil {
-		h.db.Exec("DELETE FROM image WHERE path = ?", filePath)
+		_, _ = h.db.Exec("DELETE FROM image WHERE path = ?", filePath)
 	}
 
 	db.LogAction(h.db, "image.delete", "image", name, name, "", true)
@@ -368,7 +368,7 @@ func (h *DashboardAPI) RegistryDownload(w http.ResponseWriter, r *http.Request) 
 	}
 	defer activeDownloads.Delete(req.Name)
 
-	os.MkdirAll(filepath.Dir(outputPath), 0755)
+	_ = os.MkdirAll(filepath.Dir(outputPath), 0755)
 
 	// Try gzip first, then uncompressed (same order as CLI)
 	var downloadURL string
@@ -423,7 +423,9 @@ func (h *DashboardAPI) RegistryDownload(w http.ResponseWriter, r *http.Request) 
 		defer gzReader.Close()
 	}
 
-	if _, err := io.Copy(tmpFile, reader); err != nil {
+	// Limit download to 20GB to prevent disk exhaustion from malicious registries
+	const maxDownloadSize = 20 << 30
+	if _, err := io.Copy(tmpFile, io.LimitReader(reader, maxDownloadSize)); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("download write failed: %v", err))
@@ -447,9 +449,9 @@ func (h *DashboardAPI) RegistryDownload(w http.ResponseWriter, r *http.Request) 
 		if info != nil {
 			sizeBytes = info.Size()
 		}
-		h.db.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'registry', ?, ?, ?)",
+		_, _ = h.db.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'registry', ?, ?, ?)",
 			imageDigest, req.Name, req.Name+".rootfs.ext4", outputPath, sizeBytes, req.Name, now, now)
-		h.db.Exec("INSERT OR IGNORE INTO image_tag (tag, digest) VALUES (?, ?)", req.Name, imageDigest)
+		_, _ = h.db.Exec("INSERT OR IGNORE INTO image_tag (tag, digest) VALUES (?, ?)", req.Name, imageDigest)
 	}
 
 	// Invalidate registry cache so next fetch shows updated downloaded state

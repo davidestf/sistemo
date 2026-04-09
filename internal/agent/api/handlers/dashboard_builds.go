@@ -78,7 +78,7 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 	// Check for existing active build in DB
 	if h.db != nil {
 		var existingStatus string
-		h.db.QueryRow("SELECT status FROM image_build WHERE build_name = ? AND status = 'building'", buildName).Scan(&existingStatus)
+		_ = h.db.QueryRow("SELECT status FROM image_build WHERE build_name = ? AND status = 'building'", buildName).Scan(&existingStatus)
 		if existingStatus == "building" {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "build already in progress", "image": buildName})
 			return
@@ -119,7 +119,7 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 
 		// Use ~/.sistemo/tmp/ for builds instead of /tmp (which may be RAM-backed tmpfs).
 		buildTmpBase := filepath.Join(h.cfg.DataDir, "tmp")
-		os.MkdirAll(buildTmpBase, 0755)
+		_ = os.MkdirAll(buildTmpBase, 0755)
 		tmpDir, err := os.MkdirTemp(buildTmpBase, "build-*")
 		if err != nil {
 			updateBuild("error", fmt.Sprintf("create temp dir: %v", err), 0, "")
@@ -259,14 +259,14 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 			h.logger.Warn("build timeout reached, killing", zap.String("build_id", buildID), zap.Int("timeout_min", timeoutMin))
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 			time.AfterFunc(10*time.Second, func() {
 				select {
 				case <-buildDone:
 					return
 				default:
 				}
-				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			})
 		})
 
@@ -307,12 +307,15 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 
 				tx, txErr := h.db.Begin()
 				if txErr == nil {
-					defer tx.Rollback() // no-op after successful commit
-					tx.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'docker_build', ?, ?, ?)",
-						digest, buildName, buildName+".rootfs.ext4", outputPath, sizeBytes, imageName, now, now)
-					tx.Exec("INSERT OR REPLACE INTO image_tag (tag, digest) VALUES (?, ?)", buildName, digest)
-					tx.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, buildID)
-					if commitErr := tx.Commit(); commitErr != nil {
+					defer func() { _ = tx.Rollback() }() // no-op after successful commit
+					if _, err := tx.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'docker_build', ?, ?, ?)",
+						digest, buildName, buildName+".rootfs.ext4", outputPath, sizeBytes, imageName, now, now); err != nil {
+						h.logger.Warn("failed to insert image", zap.String("build_id", buildID), zap.Error(err))
+					} else if _, err := tx.Exec("INSERT OR REPLACE INTO image_tag (tag, digest) VALUES (?, ?)", buildName, digest); err != nil {
+						h.logger.Warn("failed to insert image tag", zap.String("build_id", buildID), zap.Error(err))
+					} else if _, err := tx.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, buildID); err != nil {
+						h.logger.Warn("failed to update build digest", zap.String("build_id", buildID), zap.Error(err))
+					} else if commitErr := tx.Commit(); commitErr != nil {
 						h.logger.Warn("failed to commit image registration", zap.String("build_id", buildID), zap.Error(commitErr))
 					}
 				} else {
@@ -373,7 +376,7 @@ func (h *DashboardAPI) DockerfileBuild(w http.ResponseWriter, r *http.Request) {
 	// Check for existing active build
 	if h.db != nil {
 		var existingStatus string
-		h.db.QueryRow("SELECT status FROM image_build WHERE build_name = ? AND status = 'building'", buildName).Scan(&existingStatus)
+		_ = h.db.QueryRow("SELECT status FROM image_build WHERE build_name = ? AND status = 'building'", buildName).Scan(&existingStatus)
 		if existingStatus == "building" {
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "build already in progress", "image": buildName})
 			return
@@ -382,7 +385,7 @@ func (h *DashboardAPI) DockerfileBuild(w http.ResponseWriter, r *http.Request) {
 
 	// Prepare context directory
 	buildTmpBase := filepath.Join(h.cfg.DataDir, "tmp")
-	os.MkdirAll(buildTmpBase, 0755)
+	_ = os.MkdirAll(buildTmpBase, 0755)
 	contextDir, err := os.MkdirTemp(buildTmpBase, "dockerfile-ctx-*")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create build context directory")
@@ -558,14 +561,14 @@ func (h *DashboardAPI) DockerfileBuild(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 			h.logger.Warn("build timeout reached, killing", zap.String("build_id", buildID))
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 			time.AfterFunc(10*time.Second, func() {
 				select {
 				case <-buildDone:
 					return
 				default:
 				}
-				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			})
 		})
 
@@ -602,12 +605,17 @@ func (h *DashboardAPI) DockerfileBuild(w http.ResponseWriter, r *http.Request) {
 				}
 				tx, txErr := h.db.Begin()
 				if txErr == nil {
-					defer tx.Rollback()
-					tx.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'dockerfile_build', ?, ?, ?)",
-						digest, buildName, buildName+".rootfs.ext4", outputPath, sizeBytes, "Dockerfile:"+buildName, now, now)
-					tx.Exec("INSERT OR REPLACE INTO image_tag (tag, digest) VALUES (?, ?)", buildName, digest)
-					tx.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, buildID)
-					tx.Commit()
+					defer func() { _ = tx.Rollback() }()
+					if _, err := tx.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'dockerfile_build', ?, ?, ?)",
+						digest, buildName, buildName+".rootfs.ext4", outputPath, sizeBytes, "Dockerfile:"+buildName, now, now); err != nil {
+						h.logger.Warn("failed to insert image", zap.String("build_id", buildID), zap.Error(err))
+					} else if _, err := tx.Exec("INSERT OR REPLACE INTO image_tag (tag, digest) VALUES (?, ?)", buildName, digest); err != nil {
+						h.logger.Warn("failed to insert image tag", zap.String("build_id", buildID), zap.Error(err))
+					} else if _, err := tx.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, buildID); err != nil {
+						h.logger.Warn("failed to update build digest", zap.String("build_id", buildID), zap.Error(err))
+					} else if commitErr := tx.Commit(); commitErr != nil {
+						h.logger.Warn("failed to commit image registration", zap.String("build_id", buildID), zap.Error(commitErr))
+					}
 				}
 			}
 		}
@@ -668,7 +676,7 @@ func (h *DashboardAPI) ImageBuildStatus(w http.ResponseWriter, r *http.Request) 
 			if time.Since(started) > time.Duration(timeoutMin)*time.Minute {
 				bs.Status = "error"
 				bs.Message = fmt.Sprintf("Build timed out (exceeded %d minutes)", timeoutMin)
-				h.db.Exec("UPDATE image_build SET status='error', message=?, completed_at=? WHERE id=?",
+				_, _ = h.db.Exec("UPDATE image_build SET status='error', message=?, completed_at=? WHERE id=?",
 					bs.Message, time.Now().UTC().Format(time.RFC3339), bs.ID)
 			}
 		}
@@ -737,13 +745,13 @@ func (h *DashboardAPI) ImageBuildCancel(w http.ResponseWriter, r *http.Request) 
 	cmd, ok := activeBuildsMap[buildID]
 	if ok && cmd.Process != nil {
 		pid := cmd.Process.Pid
-		syscall.Kill(-pid, syscall.SIGTERM)
+		_ = syscall.Kill(-pid, syscall.SIGTERM)
 		h.logger.Info("sent SIGTERM to build process group", zap.String("build_id", buildID), zap.Int("pid", pid))
 		go func() {
 			time.Sleep(10 * time.Second)
 			activeBuildsMu.Lock()
 			if _, still := activeBuildsMap[buildID]; still && cmd.Process != nil {
-				syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 				h.logger.Info("sent SIGKILL to build process group", zap.String("build_id", buildID))
 			}
 			activeBuildsMu.Unlock()
@@ -752,7 +760,7 @@ func (h *DashboardAPI) ImageBuildCancel(w http.ResponseWriter, r *http.Request) 
 	activeBuildsMu.Unlock()
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	h.db.Exec("UPDATE image_build SET status='error', message='Cancelled by user', completed_at=? WHERE id=? AND status='building'",
+	_, _ = h.db.Exec("UPDATE image_build SET status='error', message='Cancelled by user', completed_at=? WHERE id=? AND status='building'",
 		now, buildID)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled", "build_id": buildID})

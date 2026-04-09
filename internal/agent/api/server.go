@@ -33,6 +33,7 @@ func NewRouter(cfg *config.Config, mgr *machine.Manager, logger *zap.Logger, db 
 
 	// Global middleware
 	r.Use(middleware.RequestID)
+	r.Use(agentmw.SecureHeaders)
 	r.Use(agentmw.SaveOriginalRemoteAddr) // Must run BEFORE RealIP
 	r.Use(middleware.RealIP)
 	if cfg.RateLimitRPS > 0 {
@@ -70,7 +71,7 @@ func NewRouter(cfg *config.Config, mgr *machine.Manager, logger *zap.Logger, db 
 
 	// Handler groups
 	machineHandler := handlers.NewMachine(mgr, cfg, logger, db)
-	terminalHandler := handlers.NewTerminal(mgr, cfg, logger, db)
+	terminalHandler := handlers.NewTerminal(mgr, cfg, logger, db, jwtSecret)
 	healthHandler := handlers.NewHealth(mgr, cfg, logger)
 	networkHandler := handlers.NewNetwork(logger, db)
 	volumesDir := filepath.Join(filepath.Dir(cfg.VMBaseDir), "volumes")
@@ -91,7 +92,7 @@ func NewRouter(cfg *config.Config, mgr *machine.Manager, logger *zap.Logger, db 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"service":"sistemo","api":"/api/v1/","dashboard":"/dashboard/"}`))
+		_, _ = w.Write([]byte(`{"service":"sistemo","api":"/api/v1/","dashboard":"/dashboard/"}`))
 	})
 	r.Head("/", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	r.Get("/health", healthHandler.Health)

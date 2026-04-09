@@ -69,7 +69,7 @@ func execOnMachine(ctx context.Context, m *Manager, machineID, script string, ti
 	}
 
 	if ctx.Err() != nil && cmd.Process != nil {
-		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 
 	return &ExecResult{

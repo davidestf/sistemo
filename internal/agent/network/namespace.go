@@ -141,28 +141,28 @@ func (n *VMNetwork) Create() error {
 				return fmt.Errorf("failed to re-create namespace %s after veth cleanup: %s", n.NamespaceName, out3)
 			}
 			if rc2, out2, _ := run("ip", "link", "add", n.VethOut, "type", "veth", "peer", "name", n.VethIn); rc2 != 0 {
-				n.Cleanup("")
+				_ = n.Cleanup("")
 				return fmt.Errorf("failed to create veth pair after cleanup: %s", out2)
 			}
 		} else {
-			n.Cleanup("")
+			_ = n.Cleanup("")
 			return fmt.Errorf("failed to create veth pair: %s", out)
 		}
 	}
 
 	// --- Host side: attach veth-out to host bridge, bring up ---
 	if rc, out, _ := run("ip", "link", "set", n.VethOut, "master", n.HostBridge); rc != 0 {
-		n.Cleanup("")
+		_ = n.Cleanup("")
 		return fmt.Errorf("failed to attach veth to bridge: %s", out)
 	}
 	if rc, out, _ := run("ip", "link", "set", n.VethOut, "up"); rc != 0 {
-		n.Cleanup("")
+		_ = n.Cleanup("")
 		return fmt.Errorf("failed to bring up veth-out: %s", out)
 	}
 
 	// --- Move veth-in into namespace ---
 	if rc, out, _ := run("ip", "link", "set", n.VethIn, "netns", n.NamespaceName); rc != 0 {
-		n.Cleanup("")
+		_ = n.Cleanup("")
 		return fmt.Errorf("failed to move veth to namespace: %s", out)
 	}
 
@@ -173,38 +173,38 @@ func (n *VMNetwork) Create() error {
 	// Create namespace-local bridge
 	if rc, out, _ := runInNamespace(n.NamespaceName, "ip", "link", "add", n.NsBridge, "type", "bridge"); rc != 0 {
 		if !strings.Contains(out, "File exists") {
-			n.Cleanup("")
+			_ = n.Cleanup("")
 			return fmt.Errorf("failed to create namespace bridge: %s", out)
 		}
 	}
 	if rc, out, _ := runInNamespace(n.NamespaceName, "ip", "link", "set", n.NsBridge, "up"); rc != 0 {
-		n.Cleanup("")
+		_ = n.Cleanup("")
 		return fmt.Errorf("failed to bring up namespace bridge: %s", out)
 	}
 
 	// Attach veth-in to namespace bridge
 	if rc, out, _ := runInNamespace(n.NamespaceName, "ip", "link", "set", n.VethIn, "master", n.NsBridge); rc != 0 {
-		n.Cleanup("")
+		_ = n.Cleanup("")
 		return fmt.Errorf("failed to attach veth-in to ns bridge: %s", out)
 	}
 	if rc, out, _ := runInNamespace(n.NamespaceName, "ip", "link", "set", n.VethIn, "up"); rc != 0 {
-		n.Cleanup("")
+		_ = n.Cleanup("")
 		return fmt.Errorf("failed to bring up veth-in: %s", out)
 	}
 
 	// Create TAP device and attach to namespace bridge
 	if rc, out, _ := runInNamespace(n.NamespaceName, "ip", "tuntap", "add", n.TapName, "mode", "tap"); rc != 0 {
 		if !strings.Contains(out, "File exists") {
-			n.Cleanup("")
+			_ = n.Cleanup("")
 			return fmt.Errorf("failed to create TAP device: %s", out)
 		}
 	}
 	if rc, out, _ := runInNamespace(n.NamespaceName, "ip", "link", "set", n.TapName, "master", n.NsBridge); rc != 0 {
-		n.Cleanup("")
+		_ = n.Cleanup("")
 		return fmt.Errorf("failed to attach TAP to ns bridge: %s", out)
 	}
 	if rc, out, _ := runInNamespace(n.NamespaceName, "ip", "link", "set", n.TapName, "up"); rc != 0 {
-		n.Cleanup("")
+		_ = n.Cleanup("")
 		return fmt.Errorf("failed to bring up TAP: %s", out)
 	}
 
@@ -300,7 +300,7 @@ func (n *VMNetwork) UnexposePort(_ string, hostPort, vmPort int, protocol string
 // CleanupPortRules removes all DNAT rules for the given port rules.
 func (n *VMNetwork) CleanupPortRules(_ string, rules []PortRule) {
 	for _, r := range rules {
-		n.UnexposePort("", r.HostPort, r.MachinePort, r.Protocol)
+		_ = n.UnexposePort("", r.HostPort, r.MachinePort, r.Protocol)
 	}
 }
 
@@ -313,7 +313,7 @@ func FlushDNATRulesForPort(hostPort int, protocol string) {
 	if err != nil {
 		return
 	}
-	firewall.FlushDNATForPort(hostPort, protocol)
+	_ = firewall.FlushDNATForPort(hostPort, protocol)
 }
 
 // GetBootArgs returns the kernel boot args for static IP configuration.
@@ -370,7 +370,7 @@ func CleanupAllNamespaces(hostInterface string, logger *zap.Logger, preserve map
 			}
 			logger.Info("cleaning up stale namespace", zap.String("namespace", nsName))
 			ns := &VMNetwork{NamespaceName: nsName, Logger: logger}
-			ns.Cleanup(hostInterface)
+			_ = ns.Cleanup(hostInterface)
 		}
 	}
 }

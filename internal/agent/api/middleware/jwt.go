@@ -75,7 +75,7 @@ func DashboardAuth(apiKey string, jwtSecret []byte, adminExistsFn func() bool) f
 			//    admin exists (and no valid JWT was provided)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":"unauthorized"}`))
+			_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 		})
 	}
 }
@@ -133,6 +133,25 @@ func ParseJWTFromRequest(r *http.Request, secret []byte) (*JWTClaims, bool) {
 		return nil, false
 	}
 
+	claims := &JWTClaims{}
+	token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
+		return secret, nil
+	})
+	if err != nil || !token.Valid {
+		return nil, false
+	}
+	return claims, true
+}
+
+// ParseJWTToken validates a raw JWT token string and returns the claims.
+// Used by WebSocket handlers that receive the token in a message body.
+func ParseJWTToken(tokenStr string, secret []byte) (*JWTClaims, bool) {
+	if tokenStr == "" {
+		return nil, false
+	}
 	claims := &JWTClaims{}
 	token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {

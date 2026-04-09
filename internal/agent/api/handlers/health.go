@@ -46,18 +46,18 @@ func (h *Health) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Health) Ready(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	if _, err := os.Stat(h.cfg.FirecrackerBin); os.IsNotExist(err) {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte(`{"ready":false,"reason":"firecracker binary not found"}`))
+		_, _ = w.Write([]byte(`{"ready":false,"reason":"firecracker binary not found"}`))
 		return
 	}
 	if _, err := os.Stat(h.cfg.KernelImagePath); os.IsNotExist(err) {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte(`{"ready":false,"reason":"kernel not found"}`))
+		_, _ = w.Write([]byte(`{"ready":false,"reason":"kernel not found"}`))
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"ready":true}`))
+	_, _ = w.Write([]byte(`{"ready":true}`))
 }
 
 func (h *Health) Info(w http.ResponseWriter, r *http.Request) {

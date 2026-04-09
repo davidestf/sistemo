@@ -67,7 +67,7 @@ func (h *DashboardAPI) AuditLog(w http.ResponseWriter, r *http.Request) {
 
 	// Get total count
 	var total int
-	h.db.QueryRow("SELECT COUNT(*) FROM audit_log"+where, args...).Scan(&total)
+	_ = h.db.QueryRow("SELECT COUNT(*) FROM audit_log"+where, args...).Scan(&total)
 
 	// Get entries
 	query := "SELECT id, timestamp, action, target_type, target_id, target_name, details, success FROM audit_log" + where + " ORDER BY id DESC LIMIT ? OFFSET ?"
@@ -147,7 +147,7 @@ func (h *DashboardAPI) Networks(w http.ResponseWriter, r *http.Request) {
 
 	// Count machines on default network (no network_id)
 	var defaultCount int
-	h.db.QueryRow("SELECT COUNT(*) FROM machine WHERE (network_id IS NULL OR network_id = '') AND status != 'deleted'").Scan(&defaultCount)
+	_ = h.db.QueryRow("SELECT COUNT(*) FROM machine WHERE (network_id IS NULL OR network_id = '') AND status != 'deleted'").Scan(&defaultCount)
 
 	results := []networkV1Response{{
 		Name:         "default",

@@ -47,6 +47,19 @@ func doRequest(req *http.Request, timeout time.Duration) (*http.Response, error)
 	return resp, nil
 }
 
+// apiPath builds a URL from the base and path segments, escaping each segment.
+func apiPath(base string, segments ...string) string {
+	parts := make([]string, len(segments))
+	for i, s := range segments {
+		parts[i] = url.PathEscape(s)
+	}
+	path := ""
+	for _, p := range parts {
+		path += "/" + p
+	}
+	return base + path
+}
+
 // checkResponse reads the response and returns an error if status is not 2xx.
 func checkResponse(resp *http.Response) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -97,7 +110,7 @@ func CreateMachine(baseURL string, req *CreateMachineRequest) (*CreateMachineRes
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := checkResponse(resp); err != nil {
 		return nil, err
 	}
@@ -114,7 +127,7 @@ func DeleteMachine(baseURL, machineID string, preserveStorage bool) (bool, error
 	if preserveStorage {
 		ps = "true"
 	}
-	httpReq, err := http.NewRequest(http.MethodDelete, baseURL+"/api/v1/machines/"+machineID+"?preserve_storage="+ps, nil)
+	httpReq, err := http.NewRequest(http.MethodDelete, apiPath(baseURL, "api", "v1", "machines", machineID)+"?preserve_storage="+ps, nil)
 	if err != nil {
 		return false, err
 	}
@@ -122,7 +135,7 @@ func DeleteMachine(baseURL, machineID string, preserveStorage bool) (bool, error
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return false, nil
 	}
@@ -134,7 +147,7 @@ func DeleteMachine(baseURL, machineID string, preserveStorage bool) (bool, error
 
 // StopMachine calls POST /machines/{machineID}/stop on the daemon.
 func StopMachine(baseURL, machineID string) (bool, error) {
-	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/machines/"+machineID+"/stop", nil)
+	httpReq, err := http.NewRequest(http.MethodPost, apiPath(baseURL, "api", "v1", "machines", machineID, "stop"), nil)
 	if err != nil {
 		return false, err
 	}
@@ -142,7 +155,7 @@ func StopMachine(baseURL, machineID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return false, nil
 	}
@@ -154,7 +167,7 @@ func StopMachine(baseURL, machineID string) (bool, error) {
 
 // StartMachine calls POST /machines/{machineID}/start on the daemon.
 func StartMachine(baseURL, machineID string) (*CreateMachineResponse, error) {
-	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/machines/"+machineID+"/start", nil)
+	httpReq, err := http.NewRequest(http.MethodPost, apiPath(baseURL, "api", "v1", "machines", machineID, "start"), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +175,7 @@ func StartMachine(baseURL, machineID string) (*CreateMachineResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := checkResponse(resp); err != nil {
 		return nil, err
 	}
@@ -183,7 +196,7 @@ func Health(baseURL string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("health returned %d", resp.StatusCode)
 	}
@@ -201,7 +214,7 @@ func ExposePort(baseURL, machineID string, hostPort, machinePort int, protocol s
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/machines/"+machineID+"/expose", bytes.NewReader(data))
+	httpReq, err := http.NewRequest(http.MethodPost, apiPath(baseURL, "api", "v1", "machines", machineID, "expose"), bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -210,13 +223,13 @@ func ExposePort(baseURL, machineID string, hostPort, machinePort int, protocol s
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return checkResponse(resp)
 }
 
 // UnexposePort calls DELETE /machines/{machineID}/expose/{hostPort} on the daemon.
 func UnexposePort(baseURL, machineID string, hostPort int) error {
-	httpReq, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/v1/machines/%s/expose/%d", baseURL, machineID, hostPort), nil)
+	httpReq, err := http.NewRequest(http.MethodDelete, apiPath(baseURL, "api", "v1", "machines", machineID, "expose", fmt.Sprintf("%d", hostPort)), nil)
 	if err != nil {
 		return err
 	}
@@ -224,7 +237,7 @@ func UnexposePort(baseURL, machineID string, hostPort int) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return checkResponse(resp)
 }
 
@@ -248,13 +261,13 @@ func CreateNetwork(baseURL, name, subnet, bridgeName string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return checkResponse(resp)
 }
 
 // DeleteNetwork calls DELETE /networks/{name} on the daemon.
 func DeleteNetwork(baseURL, name string) error {
-	httpReq, err := http.NewRequest(http.MethodDelete, baseURL+"/api/v1/networks/"+name, nil)
+	httpReq, err := http.NewRequest(http.MethodDelete, apiPath(baseURL, "api", "v1", "networks", name), nil)
 	if err != nil {
 		return err
 	}
@@ -262,7 +275,7 @@ func DeleteNetwork(baseURL, name string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
 		return checkResponse(resp)
 	}
@@ -289,7 +302,7 @@ func Exec(baseURL, machineID, script string, timeoutSec int) (*ExecResult, error
 	if err != nil {
 		return nil, err
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/machines/"+machineID+"/exec", bytes.NewReader(data))
+	httpReq, err := http.NewRequest(http.MethodPost, apiPath(baseURL, "api", "v1", "machines", machineID, "exec"), bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +311,7 @@ func Exec(baseURL, machineID, script string, timeoutSec int) (*ExecResult, error
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := checkResponse(resp); err != nil {
 		return nil, err
 	}
@@ -341,7 +354,7 @@ func CreateVolume(baseURL string, sizeMB int, name string) (*VolumeResponse, err
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := checkResponse(resp); err != nil {
 		return nil, err
 	}
@@ -362,7 +375,7 @@ func ListVolumes(baseURL string) ([]VolumeResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := checkResponse(resp); err != nil {
 		return nil, err
 	}
@@ -375,7 +388,7 @@ func ListVolumes(baseURL string) ([]VolumeResponse, error) {
 
 // GetVolume calls GET /volumes/{idOrName} on the daemon.
 func GetVolume(baseURL, idOrName string) (*VolumeResponse, error) {
-	httpReq, err := http.NewRequest(http.MethodGet, baseURL+"/api/v1/volumes/"+idOrName, nil)
+	httpReq, err := http.NewRequest(http.MethodGet, apiPath(baseURL, "api", "v1", "volumes", idOrName), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +396,7 @@ func GetVolume(baseURL, idOrName string) (*VolumeResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if err := checkResponse(resp); err != nil {
 		return nil, err
 	}
@@ -396,7 +409,7 @@ func GetVolume(baseURL, idOrName string) (*VolumeResponse, error) {
 
 // DeleteVolume calls DELETE /volumes/{idOrName} on the daemon.
 func DeleteVolume(baseURL, idOrName string) error {
-	httpReq, err := http.NewRequest(http.MethodDelete, baseURL+"/api/v1/volumes/"+idOrName, nil)
+	httpReq, err := http.NewRequest(http.MethodDelete, apiPath(baseURL, "api", "v1", "volumes", idOrName), nil)
 	if err != nil {
 		return err
 	}
@@ -404,7 +417,7 @@ func DeleteVolume(baseURL, idOrName string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return checkResponse(resp)
 }
 
@@ -417,7 +430,7 @@ func ResizeVolume(baseURL, idOrName string, sizeMB int) error {
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, baseURL+"/api/v1/volumes/"+idOrName+"/resize", bytes.NewReader(data))
+	httpReq, err := http.NewRequest(http.MethodPost, apiPath(baseURL, "api", "v1", "volumes", idOrName, "resize"), bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -426,7 +439,7 @@ func ResizeVolume(baseURL, idOrName string, sizeMB int) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return checkResponse(resp)
 }
 
@@ -439,7 +452,7 @@ func AttachVolume(baseURL, machineID, volumeIDOrName string) error {
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/api/v1/machines/%s/volume/attach", baseURL, machineID), bytes.NewReader(data))
+	httpReq, err := http.NewRequest(http.MethodPost, apiPath(baseURL, "api", "v1", "machines", machineID, "volume", "attach"), bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -448,7 +461,7 @@ func AttachVolume(baseURL, machineID, volumeIDOrName string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return checkResponse(resp)
 }
 
@@ -461,7 +474,7 @@ func DetachVolume(baseURL, machineID, volumeIDOrName string) error {
 	if err != nil {
 		return err
 	}
-	httpReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/api/v1/machines/%s/volume/detach", baseURL, machineID), bytes.NewReader(data))
+	httpReq, err := http.NewRequest(http.MethodPost, apiPath(baseURL, "api", "v1", "machines", machineID, "volume", "detach"), bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -470,6 +483,6 @@ func DetachVolume(baseURL, machineID, volumeIDOrName string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return checkResponse(resp)
 }

@@ -209,7 +209,9 @@ func runLogs(logger *zap.Logger, database *sql.DB, nameOrID string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("logs request failed: HTTP %d", resp.StatusCode)
 	}
-	io.Copy(os.Stdout, resp.Body)
+	if _, err := io.Copy(os.Stdout, resp.Body); err != nil {
+		return fmt.Errorf("read logs: %w", err)
+	}
 	return nil
 }
 

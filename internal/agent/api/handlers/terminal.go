@@ -18,6 +18,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"github.com/davidestf/sistemo/internal/agent/config"
+	agentmw "github.com/davidestf/sistemo/internal/agent/api/middleware"
 	"github.com/davidestf/sistemo/internal/agent/machine"
 	"go.uber.org/zap"
 )
@@ -65,14 +66,19 @@ var upgrader = websocket.Upgrader{
 }
 
 type Terminal struct {
-	mgr    *machine.Manager
-	cfg    *config.Config
-	logger *zap.Logger
-	db     *sql.DB
+	mgr       *machine.Manager
+	cfg       *config.Config
+	logger    *zap.Logger
+	db        *sql.DB
+	jwtSecret []byte
 }
 
-func NewTerminal(mgr *machine.Manager, cfg *config.Config, logger *zap.Logger, db *sql.DB) *Terminal {
-	return &Terminal{mgr: mgr, cfg: cfg, logger: logger, db: db}
+func NewTerminal(mgr *machine.Manager, cfg *config.Config, logger *zap.Logger, db *sql.DB, jwtSecret ...[]byte) *Terminal {
+	t := &Terminal{mgr: mgr, cfg: cfg, logger: logger, db: db}
+	if len(jwtSecret) > 0 {
+		t.jwtSecret = jwtSecret[0]
+	}
+	return t
 }
 
 // getNamespaceFromDB returns the namespace for the machine from the machine table, or "" if not found or db is nil.
@@ -89,9 +95,10 @@ func (h *Terminal) getNamespaceFromDB(machineID string) string {
 
 // controlMsg is a JSON control message from the client (connect or resize).
 type controlMsg struct {
-	Type string `json:"type"`
-	Rows uint16 `json:"rows"`
-	Cols uint16 `json:"cols"`
+	Type  string `json:"type"`
+	Token string `json:"token,omitempty"` // JWT token sent in first connect message (preferred over query param)
+	Rows  uint16 `json:"rows"`
+	Cols  uint16 `json:"cols"`
 }
 
 // TerminalPageOrWebSocket: if the request is a WebSocket upgrade, run WebSocket; otherwise serve an HTML page that opens the terminal via WebSocket (so opening the URL in a browser works).
@@ -200,8 +207,8 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	// Clear HTTP deadlines for long-lived WebSocket
-	conn.UnderlyingConn().SetReadDeadline(time.Time{})
-	conn.UnderlyingConn().SetWriteDeadline(time.Time{})
+	_ = conn.UnderlyingConn().SetReadDeadline(time.Time{})
+	_ = conn.UnderlyingConn().SetWriteDeadline(time.Time{})
 
 	h.logger.Info("terminal websocket connected", zap.String("vmip", vmip), zap.String("namespace", ns))
 
@@ -209,9 +216,9 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 	initialRows := uint16(24)
 	initialCols := uint16(80)
 
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	_, firstMsg, err := conn.ReadMessage()
-	conn.SetReadDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		h.logger.Error("failed to read initial connect message", zap.Error(err))
 		return
@@ -221,6 +228,18 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 	if json.Unmarshal(firstMsg, &ctrl) == nil && ctrl.Rows > 0 && ctrl.Cols > 0 {
 		initialRows = ctrl.Rows
 		initialCols = ctrl.Cols
+	}
+
+	// Validate JWT from connect message if user wasn't authenticated by middleware
+	// (i.e., token was sent in the message body instead of URL query param)
+	if _, ok := r.Context().Value(agentmw.ContextKeyUsername).(string); !ok {
+		if len(h.jwtSecret) > 0 && ctrl.Token != "" {
+			if _, valid := agentmw.ParseJWTToken(ctrl.Token, h.jwtSecret); !valid {
+				h.logger.Warn("terminal: invalid JWT in connect message")
+				_ = conn.WriteMessage(websocket.TextMessage, []byte("authentication failed"))
+				return
+			}
+		}
 	}
 
 	h.logger.Info("terminal initial size", zap.Uint16("rows", initialRows), zap.Uint16("cols", initialCols))
@@ -260,15 +279,15 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		h.logger.Error("failed to start SSH with PTY", zap.Error(err))
-		conn.WriteMessage(websocket.TextMessage, []byte("Failed to connect to machine: "+err.Error()))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("Failed to connect to machine: "+err.Error()))
 		return
 	}
 	defer ptmx.Close()
 
 	pid := sshCmd.Process.Pid
 	defer func() {
-		syscall.Kill(-pid, syscall.SIGKILL)
-		sshCmd.Wait()
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = sshCmd.Wait()
 	}()
 
 	sw := &safeWriter{conn: conn}
@@ -307,11 +326,11 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 				var ctrl controlMsg
 				if json.Unmarshal(msg, &ctrl) == nil && (ctrl.Type == "resize" || ctrl.Type == "connect") {
 					if ctrl.Rows > 0 && ctrl.Cols > 0 {
-						pty.Setsize(ptmx, &pty.Winsize{Rows: ctrl.Rows, Cols: ctrl.Cols})
+						_ = pty.Setsize(ptmx, &pty.Winsize{Rows: ctrl.Rows, Cols: ctrl.Cols})
 					}
 					continue
 				}
-				ptmx.Write(msg)
+				_, _ = ptmx.Write(msg)
 			}
 		}
 	}()

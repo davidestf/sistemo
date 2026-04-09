@@ -44,6 +44,10 @@ func New(dataDir string) (*sql.DB, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
+	// SQLite supports only one writer at a time. WAL mode allows concurrent readers,
+	// so we allow a small pool for read parallelism while serializing writes.
+	db.SetMaxOpenConns(4)
+
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
@@ -216,7 +220,10 @@ func migrateExistingImages(db *sql.DB, dataDir string) {
 				builtNames[name] = true
 			}
 		}
-		rows.Close()
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: error reading image builds: %v\n", err)
+		}
 	}
 
 	count := 0
@@ -275,7 +282,9 @@ func migrateExistingImages(db *sql.DB, dataDir string) {
 		}
 
 		// Create tag (name -> digest).
-		db.Exec("INSERT OR IGNORE INTO image_tag (tag, digest) VALUES (?, ?)", name, digest)
+		if _, err := db.Exec("INSERT OR IGNORE INTO image_tag (tag, digest) VALUES (?, ?)", name, digest); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to create tag for %s: %v\n", name, err)
+		}
 
 		count++
 	}
@@ -291,7 +300,10 @@ func migrateExistingImages(db *sql.DB, dataDir string) {
 				refs = append(refs, r)
 			}
 		}
-		vmRows.Close()
+		_ = vmRows.Close()
+		if err := vmRows.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: error reading machines for image backfill: %v\n", err)
+		}
 
 		for _, r := range refs {
 			var digest string
@@ -305,10 +317,12 @@ func migrateExistingImages(db *sql.DB, dataDir string) {
 				} else if idx := len(name) - len(".ext4"); idx > 0 && name[idx:] == ".ext4" {
 					name = name[:idx]
 				}
-				db.QueryRow("SELECT digest FROM image WHERE name = ? LIMIT 1", name).Scan(&digest)
+				_ = db.QueryRow("SELECT digest FROM image WHERE name = ? LIMIT 1", name).Scan(&digest)
 			}
 			if digest != "" {
-				db.Exec("UPDATE machine SET image_digest = ? WHERE id = ?", digest, r.id)
+				if _, err := db.Exec("UPDATE machine SET image_digest = ? WHERE id = ?", digest, r.id); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to backfill image_digest for machine %s: %v\n", r.id, err)
+				}
 			}
 		}
 	}
@@ -324,19 +338,24 @@ func migrateExistingImages(db *sql.DB, dataDir string) {
 				brefs = append(brefs, b)
 			}
 		}
-		buildRows.Close()
+		_ = buildRows.Close()
+		if err := buildRows.Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: error reading builds for digest backfill: %v\n", err)
+		}
 
 		for _, b := range brefs {
 			var digest string
-			db.QueryRow("SELECT digest FROM image WHERE name = ? LIMIT 1", b.buildName).Scan(&digest)
+			_ = db.QueryRow("SELECT digest FROM image WHERE name = ? LIMIT 1", b.buildName).Scan(&digest)
 			if digest != "" {
-				db.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, b.id)
+				if _, err := db.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, b.id); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: failed to backfill image_digest for build %s: %v\n", b.id, err)
+				}
 			}
 		}
 	}
 
 	// Write sentinel file.
-	os.WriteFile(sentinel, []byte(fmt.Sprintf("migrated %d images\n", count)), 0644)
+	_ = os.WriteFile(sentinel, []byte(fmt.Sprintf("migrated %d images\n", count)), 0644)
 	if count > 0 {
 		fmt.Fprintf(os.Stderr, "migrated %d images to content-addressable store (sha256)\n", count)
 	}
@@ -382,39 +401,41 @@ func runMigrations(db *sql.DB) error {
 		// disable before and re-enable + verify after.
 		needsFKOff := strings.Contains(string(body), "DROP TABLE")
 		if needsFKOff {
-			db.Exec("PRAGMA foreign_keys = OFF")
+			if _, err := db.Exec("PRAGMA foreign_keys = OFF"); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to disable FK checks for migration %s: %v\n", name, err)
+			}
 		}
 
 		// Run migration + tracking insert in a transaction to prevent half-applied state
 		tx, err := db.Begin()
 		if err != nil {
 			if needsFKOff {
-				db.Exec("PRAGMA foreign_keys = ON")
+				_, _ = db.Exec("PRAGMA foreign_keys = ON")
 			}
 			return fmt.Errorf("begin migration %s: %w", name, err)
 		}
 		if _, err := tx.Exec(string(body)); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			if needsFKOff {
-				db.Exec("PRAGMA foreign_keys = ON")
+				_, _ = db.Exec("PRAGMA foreign_keys = ON")
 			}
 			return fmt.Errorf("migration %s: %w", name, err)
 		}
 		if _, err := tx.Exec("INSERT INTO schema_migration (name) VALUES (?)", name); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			if needsFKOff {
-				db.Exec("PRAGMA foreign_keys = ON")
+				_, _ = db.Exec("PRAGMA foreign_keys = ON")
 			}
 			return fmt.Errorf("record migration %s: %w", name, err)
 		}
 		if err := tx.Commit(); err != nil {
 			if needsFKOff {
-				db.Exec("PRAGMA foreign_keys = ON")
+				_, _ = db.Exec("PRAGMA foreign_keys = ON")
 			}
 			return fmt.Errorf("commit migration %s: %w", name, err)
 		}
 		if needsFKOff {
-			db.Exec("PRAGMA foreign_keys = ON")
+			_, _ = db.Exec("PRAGMA foreign_keys = ON")
 			// Verify FK integrity after table rebuild — check all violations
 			fkRows, fkErr := db.Query("PRAGMA foreign_key_check")
 			if fkErr == nil {
@@ -424,7 +445,7 @@ func runMigrations(db *sql.DB) error {
 						fmt.Fprintf(os.Stderr, "warning: FK violation after migration %s: table=%s row=%s parent=%s\n", name, table, rowid, parent)
 					}
 				}
-				fkRows.Close()
+				_ = fkRows.Close()
 			}
 		}
 	}

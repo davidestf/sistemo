@@ -345,7 +345,7 @@ func (h *Volume) Resize(w http.ResponseWriter, r *http.Request) {
 	// Restore status on completion or error
 	restoreStatus := volStatus
 	defer func() {
-		h.db.Exec("UPDATE volume SET status=?, last_state_change=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id=? AND status='maintenance'",
+		_, _ = h.db.Exec("UPDATE volume SET status=?, last_state_change=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id=? AND status='maintenance'",
 			restoreStatus, volID)
 	}()
 

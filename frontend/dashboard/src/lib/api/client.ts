@@ -36,6 +36,8 @@ async function request<T>(method: string, path: string, body?: unknown, retry = 
     response = await fetch(path, opts);
   } catch (err) {
     if (retry) {
+      // Wait before retrying to avoid hammering on transient network issues
+      await new Promise(r => setTimeout(r, 1000));
       response = await fetch(path, opts);
     } else {
       throw err;

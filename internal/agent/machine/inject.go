@@ -31,7 +31,7 @@ func injectRootfs(rootfsExt4, pubKeyPath string, logger *zap.Logger) error {
 	unmount := func() {
 		if err := exec.Command("umount", mnt).Run(); err != nil {
 			// Lazy unmount as fallback to prevent stale mounts
-			exec.Command("umount", "-l", mnt).Run()
+			_ = exec.Command("umount", "-l", mnt).Run()
 		}
 	}
 	defer unmount()
@@ -43,8 +43,8 @@ func injectRootfs(rootfsExt4, pubKeyPath string, logger *zap.Logger) error {
 	}
 	// /sbin/init -> /init (so kernel init=/init finds it)
 	sbinInit := filepath.Join(mnt, "sbin", "init")
-	os.MkdirAll(filepath.Dir(sbinInit), 0755)
-	os.Remove(sbinInit)
+	_ = os.MkdirAll(filepath.Dir(sbinInit), 0755)
+	_ = os.Remove(sbinInit)
 	if err := os.Symlink("/init", sbinInit); err != nil {
 		// some images may have read-only or existing sbin/init; copy as fallback
 		_ = os.WriteFile(sbinInit, initScriptContent, 0755)

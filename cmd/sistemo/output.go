@@ -15,7 +15,7 @@ func isJSON() bool {
 func printJSON(v interface{}) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	enc.Encode(v)
+	_ = enc.Encode(v)
 }
 
 func confirmAction(action, target string) bool {
@@ -29,7 +29,7 @@ func confirmAction(action, target string) bool {
 	}
 	fmt.Fprintf(os.Stderr, "Are you sure you want to %s %s? [y/N] ", action, target)
 	var answer string
-	fmt.Scanln(&answer)
+	_, _ = fmt.Scanln(&answer)
 	return answer == "y" || answer == "Y" || answer == "yes"
 }
 
