@@ -317,7 +317,7 @@ func migrateExistingImages(db *sql.DB, dataDir string) {
 				} else if idx := len(name) - len(".ext4"); idx > 0 && name[idx:] == ".ext4" {
 					name = name[:idx]
 				}
-				db.QueryRow("SELECT digest FROM image WHERE name = ? LIMIT 1", name).Scan(&digest)
+				_ = db.QueryRow("SELECT digest FROM image WHERE name = ? LIMIT 1", name).Scan(&digest)
 			}
 			if digest != "" {
 				if _, err := db.Exec("UPDATE machine SET image_digest = ? WHERE id = ?", digest, r.id); err != nil {
@@ -345,7 +345,7 @@ func migrateExistingImages(db *sql.DB, dataDir string) {
 
 		for _, b := range brefs {
 			var digest string
-			db.QueryRow("SELECT digest FROM image WHERE name = ? LIMIT 1", b.buildName).Scan(&digest)
+			_ = db.QueryRow("SELECT digest FROM image WHERE name = ? LIMIT 1", b.buildName).Scan(&digest)
 			if digest != "" {
 				if _, err := db.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, b.id); err != nil {
 					fmt.Fprintf(os.Stderr, "warning: failed to backfill image_digest for build %s: %v\n", b.id, err)

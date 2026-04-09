@@ -31,7 +31,7 @@ func injectRootfs(rootfsExt4, pubKeyPath string, logger *zap.Logger) error {
 	unmount := func() {
 		if err := exec.Command("umount", mnt).Run(); err != nil {
 			// Lazy unmount as fallback to prevent stale mounts
-			exec.Command("umount", "-l", mnt).Run()
+			_ = exec.Command("umount", "-l", mnt).Run()
 		}
 	}
 	defer unmount()

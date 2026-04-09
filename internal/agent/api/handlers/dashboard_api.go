@@ -241,7 +241,7 @@ func (h *DashboardAPI) System(w http.ResponseWriter, r *http.Request) {
 				fields := strings.Fields(line)
 				if len(fields) >= 2 {
 					var kb int64
-					fmt.Sscanf(fields[1], "%d", &kb)
+					_, _ = fmt.Sscanf(fields[1], "%d", &kb)
 					totalMemMB = kb / 1024
 				}
 				break

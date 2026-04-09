@@ -60,7 +60,7 @@ func runInstall(logger *zap.Logger, dataDir string, upgrade bool) error {
 		}
 	}
 	// SSH dir needs restricted perms
-	os.Chmod(filepath.Join(dataDir, "ssh"), 0700)
+	_ = os.Chmod(filepath.Join(dataDir, "ssh"), 0700)
 
 	fmt.Println("Sistemo data directory:", dataDir)
 
@@ -250,7 +250,7 @@ func downloadAndExtractFirecracker(url, destBin, version, arch string) error {
 
 	// Fallback: walk and find any executable starting with "firecracker"
 	if srcPath == "" {
-		filepath.Walk(tmpDir, func(path string, info os.FileInfo, err error) error {
+		_ = filepath.Walk(tmpDir, func(path string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() {
 				return nil
 			}

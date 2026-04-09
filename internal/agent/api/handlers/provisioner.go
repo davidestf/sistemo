@@ -352,7 +352,7 @@ func (p *MachineProvisioner) rollback(state *provisionState) {
 	// Clean up root volume
 	if state.rootVolID != "" {
 		if state.rootVolIsNew {
-			p.db.Exec("DELETE FROM volume WHERE id=?", state.rootVolID)
+			_, _ = p.db.Exec("DELETE FROM volume WHERE id=?", state.rootVolID)
 			if state.rootVolPath != "" {
 				os.Remove(state.rootVolPath)
 			}

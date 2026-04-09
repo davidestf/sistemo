@@ -30,7 +30,7 @@ Examples:
 		},
 	}
 	cmd.Flags().StringVar(&portFlag, "port", "", "port mapping: hostPort:vmPort or just port (required)")
-	cmd.MarkFlagRequired("port")
+	_ = cmd.MarkFlagRequired("port")
 	return cmd
 }
 
@@ -47,7 +47,7 @@ func machineUnexposeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVar(&portFlag, "port", 0, "host port to unexpose (required)")
-	cmd.MarkFlagRequired("port")
+	_ = cmd.MarkFlagRequired("port")
 	return cmd
 }
 

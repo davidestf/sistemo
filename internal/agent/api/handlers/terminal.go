@@ -207,8 +207,8 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	// Clear HTTP deadlines for long-lived WebSocket
-	conn.UnderlyingConn().SetReadDeadline(time.Time{})
-	conn.UnderlyingConn().SetWriteDeadline(time.Time{})
+	_ = conn.UnderlyingConn().SetReadDeadline(time.Time{})
+	_ = conn.UnderlyingConn().SetWriteDeadline(time.Time{})
 
 	h.logger.Info("terminal websocket connected", zap.String("vmip", vmip), zap.String("namespace", ns))
 
@@ -216,9 +216,9 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 	initialRows := uint16(24)
 	initialCols := uint16(80)
 
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	_, firstMsg, err := conn.ReadMessage()
-	conn.SetReadDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		h.logger.Error("failed to read initial connect message", zap.Error(err))
 		return
@@ -236,7 +236,7 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 		if len(h.jwtSecret) > 0 && ctrl.Token != "" {
 			if _, valid := agentmw.ParseJWTToken(ctrl.Token, h.jwtSecret); !valid {
 				h.logger.Warn("terminal: invalid JWT in connect message")
-				conn.WriteMessage(websocket.TextMessage, []byte("authentication failed"))
+				_ = conn.WriteMessage(websocket.TextMessage, []byte("authentication failed"))
 				return
 			}
 		}
@@ -279,15 +279,15 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		h.logger.Error("failed to start SSH with PTY", zap.Error(err))
-		conn.WriteMessage(websocket.TextMessage, []byte("Failed to connect to machine: "+err.Error()))
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("Failed to connect to machine: "+err.Error()))
 		return
 	}
 	defer ptmx.Close()
 
 	pid := sshCmd.Process.Pid
 	defer func() {
-		syscall.Kill(-pid, syscall.SIGKILL)
-		sshCmd.Wait()
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = sshCmd.Wait()
 	}()
 
 	sw := &safeWriter{conn: conn}
@@ -326,11 +326,11 @@ func (h *Terminal) WebSocket(w http.ResponseWriter, r *http.Request) {
 				var ctrl controlMsg
 				if json.Unmarshal(msg, &ctrl) == nil && (ctrl.Type == "resize" || ctrl.Type == "connect") {
 					if ctrl.Rows > 0 && ctrl.Cols > 0 {
-						pty.Setsize(ptmx, &pty.Winsize{Rows: ctrl.Rows, Cols: ctrl.Cols})
+						_ = pty.Setsize(ptmx, &pty.Winsize{Rows: ctrl.Rows, Cols: ctrl.Cols})
 					}
 					continue
 				}
-				ptmx.Write(msg)
+				_, _ = ptmx.Write(msg)
 			}
 		}
 	}()

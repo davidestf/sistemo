@@ -121,9 +121,9 @@ func (h *DashboardAPI) Images(w http.ResponseWriter, r *http.Request) {
 		if d, err := db.HashFile(path); err == nil {
 			digest = d
 			now := time.Now().UTC().Format(time.RFC3339)
-			h.db.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'unknown', ?, ?)",
+			_, _ = h.db.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'unknown', ?, ?)",
 				digest, name, e.Name(), path, info.Size(), now, now)
-			h.db.Exec("INSERT OR IGNORE INTO image_tag (tag, digest) VALUES (?, ?)", name, digest)
+			_, _ = h.db.Exec("INSERT OR IGNORE INTO image_tag (tag, digest) VALUES (?, ?)", name, digest)
 		}
 
 		images = append(images, imageEntry{

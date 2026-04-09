@@ -147,7 +147,7 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 		var uid, gid int
 		if _, err := fmt.Sscanf(os.Getenv("SUDO_UID"), "%d", &uid); err == nil {
 			if _, err := fmt.Sscanf(os.Getenv("SUDO_GID"), "%d", &gid); err == nil {
-				filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
+				_ = filepath.Walk(dataDir, func(path string, info os.FileInfo, err error) error {
 					if err != nil {
 						return nil
 					}
@@ -282,11 +282,11 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 						specPath := filepath.Join(dataDir, "vms", machineID, "vm_spec.json")
 						if specData, err := os.ReadFile(specPath); err == nil {
 							var spec struct{ NetworkBridge string `json:"network_bridge"` }
-							json.Unmarshal(specData, &spec)
+							_ = json.Unmarshal(specData, &spec)
 							bridge = spec.NetworkBridge
 						}
 						n := network.NewVMNetwork(machineID, machineIP, logger, bridge)
-						n.UnexposePort(cfg.HostInterface, hostPort, machinePort, protocol)
+						_ = n.UnexposePort(cfg.HostInterface, hostPort, machinePort, protocol)
 					}
 					staleMachineIDs = append(staleMachineIDs, machineID)
 					cleaned++

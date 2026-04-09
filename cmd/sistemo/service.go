@@ -116,7 +116,7 @@ func serviceStatusCmd() *cobra.Command {
 			c := exec.Command("systemctl", "status", "sistemo")
 			c.Stdout = os.Stdout
 			c.Stderr = os.Stderr
-			c.Run() // ignore exit code — systemctl returns non-zero for stopped services
+			_ = c.Run() // ignore exit code — systemctl returns non-zero for stopped services
 			return nil
 		},
 	}

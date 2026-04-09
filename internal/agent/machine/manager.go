@@ -152,7 +152,7 @@ func (m *Manager) reconcile() {
 			}
 			if info.Namespace != "" {
 				ns := &network.VMNetwork{NamespaceName: info.Namespace, Logger: m.logger}
-				ns.Cleanup(m.cfg.HostInterface)
+				_ = ns.Cleanup(m.cfg.HostInterface)
 			}
 			// Set to stopped (not error) — machine is restartable with same IP and ports.
 			// Do NOT release IP — preserved for restart.
