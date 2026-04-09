@@ -423,7 +423,9 @@ func (h *DashboardAPI) RegistryDownload(w http.ResponseWriter, r *http.Request) 
 		defer gzReader.Close()
 	}
 
-	if _, err := io.Copy(tmpFile, reader); err != nil {
+	// Limit download to 20GB to prevent disk exhaustion from malicious registries
+	const maxDownloadSize = 20 << 30
+	if _, err := io.Copy(tmpFile, io.LimitReader(reader, maxDownloadSize)); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("download write failed: %v", err))

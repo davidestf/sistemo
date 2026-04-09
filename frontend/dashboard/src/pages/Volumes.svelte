@@ -54,10 +54,6 @@
   // Stopped machines for attach dropdown
   let stoppedMachines = $derived(machines.filter(v => v.status === 'stopped'));
 
-  function statusToBadge(status: string): string {
-    return status;
-  }
-
   async function fetchData() {
     try {
       const [volData, machineData] = await Promise.all([
@@ -277,7 +273,7 @@
               <tr class="hover:bg-surface-hover transition">
                 <td class="px-4 py-3 font-medium text-text text-sm">{vol.name}</td>
                 <td class="px-4 py-3 text-muted text-sm">{formatMB(vol.size_mb)}</td>
-                <td class="px-4 py-3"><Badge status={statusToBadge(vol.status)} /></td>
+                <td class="px-4 py-3"><Badge status={vol.status} /></td>
                 <td class="px-4 py-3 text-sm">
                   {#if vol.machine_id}
                     <a

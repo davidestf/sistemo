@@ -91,10 +91,17 @@ func serviceUninstallCmd() *cobra.Command {
 			if syscall.Geteuid() != 0 {
 				return fmt.Errorf("must run as root (use sudo)")
 			}
-			exec.Command("systemctl", "stop", "sistemo").Run()
-			exec.Command("systemctl", "disable", "sistemo").Run()
-			os.Remove(unitFilePath)
-			exec.Command("systemctl", "daemon-reload").Run()
+			// Best-effort cleanup — log but don't fail on individual errors
+			if err := exec.Command("systemctl", "stop", "sistemo").Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to stop service: %v\n", err)
+			}
+			if err := exec.Command("systemctl", "disable", "sistemo").Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to disable service: %v\n", err)
+			}
+			_ = os.Remove(unitFilePath)
+			if err := exec.Command("systemctl", "daemon-reload").Run(); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to reload systemd: %v\n", err)
+			}
 			fmt.Println("Sistemo service removed.")
 			return nil
 		},

@@ -233,8 +233,10 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 	// 'error' VMs are NOT cleaned — they have valid rootfs and need user attention.
 	// 'stopped' VMs are NOT cleaned — they are restartable.
 	{
-		rows, _ := database.Query(`SELECT id FROM machine WHERE status IN ('maintenance', 'failed')`)
-		if rows != nil {
+		rows, err := database.Query(`SELECT id FROM machine WHERE status IN ('maintenance', 'failed')`)
+		if err != nil {
+			logger.Warn("failed to query stale machines", zap.Error(err))
+		} else if rows != nil {
 			var staleIDs []string
 			for rows.Next() {
 				var id string
@@ -260,10 +262,12 @@ func runDaemon(logger *zap.Logger, dataDir string) error {
 	// Clean up stale nftables port rules for machines that no longer exist.
 	// This handles the case where the daemon was killed with machines still running.
 	{
-		rows, _ := database.Query(`SELECT pr.machine_id, pr.host_port, pr.machine_port, pr.protocol
+		rows, err := database.Query(`SELECT pr.machine_id, pr.host_port, pr.machine_port, pr.protocol
 			FROM port_rule pr LEFT JOIN machine m ON pr.machine_id = m.id
 			WHERE m.id IS NULL OR m.status = 'deleted'`)
-		if rows != nil {
+		if err != nil {
+			logger.Warn("failed to query stale port rules", zap.Error(err))
+		} else if rows != nil {
 			var staleMachineIDs []string
 			cleaned := 0
 			for rows.Next() {

@@ -277,7 +277,11 @@ func killProcessGroup(pid int, machineID string, logger *zap.Logger) bool {
 			return true
 		}
 	}
-	return !processExists(pid)
+	alive := processExists(pid)
+	if alive {
+		logger.Warn("process still alive after SIGKILL, may be in uninterruptible state (zombie)", zap.Int("pid", pid))
+	}
+	return !alive
 }
 
 func isFirecrackerProcess(pid int, machineID string) bool {

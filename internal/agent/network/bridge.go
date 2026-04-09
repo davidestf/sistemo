@@ -200,8 +200,11 @@ func CreateNamedBridge(bridgeName, cidr string, logger *zap.Logger) error {
 		return fmt.Errorf("named bridge forward rules: %w", err)
 	}
 
-	// Compat: system filter table forward rules
-	firewall.EnsureSystemForward(bridgeName)
+	// Compat: system filter table forward rules (best-effort, non-fatal)
+	if err := firewall.EnsureSystemForward(bridgeName); err != nil {
+		logger.Warn("failed to add system forward rules (VMs may lack internet if system filter drops traffic)",
+			zap.String("bridge", bridgeName), zap.Error(err))
+	}
 
 	// ISOLATION: block traffic between this bridge and all other sistemo-managed bridges.
 	if err := firewall.EnsureIsolation(bridgeName, BridgeName); err != nil {

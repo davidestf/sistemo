@@ -27,14 +27,16 @@ func LaunchInNamespace(vmBaseDir string, vmID string, firecrackerBin string, cfg
 		return 0, err
 	}
 	if err := json.NewEncoder(f).Encode(cfg); err != nil {
-		f.Close()
+		_ = f.Close()
 		return 0, err
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		return 0, fmt.Errorf("close config file: %w", err)
+	}
 
 	apiSock := filepath.Join(vmDir, "firecracker.socket")
 	logPath := filepath.Join(vmDir, "firecracker.log")
-	os.Remove(apiSock)
+	_ = os.Remove(apiSock) // Remove stale socket from previous run
 
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -59,8 +61,9 @@ func LaunchInNamespace(vmBaseDir string, vmID string, firecrackerBin string, cfg
 		unitName := fmt.Sprintf("fc-%s", vmID)
 		// Clear any stale systemd scope from a previous run (stop/start cycle).
 		// Without this, systemd-run fails with "Unit was already loaded".
-		exec.Command("systemctl", "reset-failed", unitName+".scope").Run()
-		exec.Command("systemctl", "stop", unitName+".scope").Run()
+		// Best-effort: errors are expected if no prior scope exists.
+		_ = exec.Command("systemctl", "reset-failed", unitName+".scope").Run()
+		_ = exec.Command("systemctl", "stop", unitName+".scope").Run()
 
 		systemdArgs := []string{
 			"--scope",

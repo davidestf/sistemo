@@ -106,7 +106,12 @@ if [ "$BOOT_MODE" = "docker" ]; then
   # 1. Set environment variables from image config
   if [ -s "$SISTEMO_META/env" ]; then
     while IFS= read -r line; do
-      [ -n "$line" ] && export "$line" || true
+      # Validate format: NAME=value (reject lines without = or with shell metacharacters in key)
+      case "$line" in
+        [a-zA-Z_]*=*) export "$line" || true ;;
+        "") ;;
+        *) echo "[sistemo-init] skipping invalid env line: $line" ;;
+      esac
     done < "$SISTEMO_META/env"
   fi
 
@@ -211,14 +216,26 @@ if [ "$BOOT_MODE" = "docker" ]; then
   echo "[sistemo-init] exec: $*"
 
   # 8. Exec the application via tini (proper PID 1: signal forwarding + zombie reaping)
+  #    When running as a different user, we use su with -- to prevent argument injection.
+  #    Each argument is individually quoted to prevent shell metacharacter expansion.
+  _quote_args() {
+    local result=""
+    for arg in "$@"; do
+      # Escape single quotes within the argument, then wrap in single quotes
+      arg="'$(printf '%s' "$arg" | sed "s/'/'\\\\''/g")'"
+      result="$result $arg"
+    done
+    echo "$result"
+  }
+
   if [ -x "$TINI" ]; then
     if [ -n "$APP_USER" ]; then
-      exec "$TINI" -- su -s /bin/sh "$APP_USER" -c "exec $*"
+      exec "$TINI" -- su -s /bin/sh "$APP_USER" -c "exec $(_quote_args "$@")"
     fi
     exec "$TINI" -- "$@"
   else
     if [ -n "$APP_USER" ]; then
-      exec su -s /bin/sh "$APP_USER" -c "exec $*"
+      exec su -s /bin/sh "$APP_USER" -c "exec $(_quote_args "$@")"
     fi
     exec "$@"
   fi

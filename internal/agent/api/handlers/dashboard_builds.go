@@ -308,11 +308,14 @@ func (h *DashboardAPI) ImageBuild(w http.ResponseWriter, r *http.Request) {
 				tx, txErr := h.db.Begin()
 				if txErr == nil {
 					defer tx.Rollback() // no-op after successful commit
-					tx.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'docker_build', ?, ?, ?)",
-						digest, buildName, buildName+".rootfs.ext4", outputPath, sizeBytes, imageName, now, now)
-					tx.Exec("INSERT OR REPLACE INTO image_tag (tag, digest) VALUES (?, ?)", buildName, digest)
-					tx.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, buildID)
-					if commitErr := tx.Commit(); commitErr != nil {
+					if _, err := tx.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'docker_build', ?, ?, ?)",
+						digest, buildName, buildName+".rootfs.ext4", outputPath, sizeBytes, imageName, now, now); err != nil {
+						h.logger.Warn("failed to insert image", zap.String("build_id", buildID), zap.Error(err))
+					} else if _, err := tx.Exec("INSERT OR REPLACE INTO image_tag (tag, digest) VALUES (?, ?)", buildName, digest); err != nil {
+						h.logger.Warn("failed to insert image tag", zap.String("build_id", buildID), zap.Error(err))
+					} else if _, err := tx.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, buildID); err != nil {
+						h.logger.Warn("failed to update build digest", zap.String("build_id", buildID), zap.Error(err))
+					} else if commitErr := tx.Commit(); commitErr != nil {
 						h.logger.Warn("failed to commit image registration", zap.String("build_id", buildID), zap.Error(commitErr))
 					}
 				} else {
@@ -603,11 +606,16 @@ func (h *DashboardAPI) DockerfileBuild(w http.ResponseWriter, r *http.Request) {
 				tx, txErr := h.db.Begin()
 				if txErr == nil {
 					defer tx.Rollback()
-					tx.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'dockerfile_build', ?, ?, ?)",
-						digest, buildName, buildName+".rootfs.ext4", outputPath, sizeBytes, "Dockerfile:"+buildName, now, now)
-					tx.Exec("INSERT OR REPLACE INTO image_tag (tag, digest) VALUES (?, ?)", buildName, digest)
-					tx.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, buildID)
-					tx.Commit()
+					if _, err := tx.Exec("INSERT OR IGNORE INTO image (digest, name, file, path, size_bytes, source, source_ref, verified_at, created_at) VALUES (?, ?, ?, ?, ?, 'dockerfile_build', ?, ?, ?)",
+						digest, buildName, buildName+".rootfs.ext4", outputPath, sizeBytes, "Dockerfile:"+buildName, now, now); err != nil {
+						h.logger.Warn("failed to insert image", zap.String("build_id", buildID), zap.Error(err))
+					} else if _, err := tx.Exec("INSERT OR REPLACE INTO image_tag (tag, digest) VALUES (?, ?)", buildName, digest); err != nil {
+						h.logger.Warn("failed to insert image tag", zap.String("build_id", buildID), zap.Error(err))
+					} else if _, err := tx.Exec("UPDATE image_build SET image_digest = ? WHERE id = ?", digest, buildID); err != nil {
+						h.logger.Warn("failed to update build digest", zap.String("build_id", buildID), zap.Error(err))
+					} else if commitErr := tx.Commit(); commitErr != nil {
+						h.logger.Warn("failed to commit image registration", zap.String("build_id", buildID), zap.Error(commitErr))
+					}
 				}
 			}
 		}

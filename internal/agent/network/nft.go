@@ -15,6 +15,9 @@ import (
 // safeBridgeName matches valid Linux interface names (alphanumeric, hyphens, max 15 chars).
 var safeBridgeName = regexp.MustCompile(`^[a-zA-Z0-9][-a-zA-Z0-9]{0,14}$`)
 
+// safeNamespaceName matches valid network namespace names (ns- prefix, lowercase alphanumeric + hyphens).
+var safeNamespaceName = regexp.MustCompile(`^ns-[a-z0-9][-a-z0-9]{0,60}$`)
+
 // validateNftInputs validates all parameters before they're interpolated into nft rule strings.
 // This is defense-in-depth — callers also validate, but this prevents command injection
 // if a new caller is added without proper validation.
@@ -283,6 +286,9 @@ func (fw *NftFirewall) RemoveIsolation(bridge string) error {
 }
 
 func (fw *NftFirewall) BlockSMTPInNamespace(namespace string) error {
+	if !safeNamespaceName.MatchString(namespace) {
+		return fmt.Errorf("invalid namespace name %q", namespace)
+	}
 	// Create a minimal nftables ruleset inside the network namespace.
 	// The namespace is destroyed when the VM is cleaned up, which auto-removes these rules.
 	ruleset := `

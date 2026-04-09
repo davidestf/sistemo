@@ -23,8 +23,7 @@ func doctorCmd() *cobra.Command {
 		Long:  "Run diagnostic checks on your sistemo installation.\nReports pass/fail for each component with actionable fix suggestions.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			dataDir := getDataDirFromCmd(cmd)
-			runDoctor(dataDir)
-			return nil
+			return runDoctor(dataDir)
 		},
 	}
 }
@@ -35,7 +34,7 @@ type checkResult struct {
 	message string
 }
 
-func runDoctor(dataDir string) {
+func runDoctor(dataDir string) error {
 	var results []checkResult
 
 	results = append(results, checkKVM())
@@ -64,10 +63,10 @@ func runDoctor(dataDir string) {
 	fmt.Println()
 	if failed == 0 {
 		fmt.Printf("%d/%d checks passed\n", passed, passed)
-	} else {
-		fmt.Printf("%d/%d checks passed, %d failed\n", passed, len(results), failed)
-		os.Exit(1)
+		return nil
 	}
+	fmt.Printf("%d/%d checks passed, %d failed\n", passed, len(results), failed)
+	return fmt.Errorf("%d checks failed", failed)
 }
 
 func checkKVM() checkResult {

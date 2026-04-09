@@ -85,7 +85,7 @@ func (rl *IPRateLimiter) Middleware() func(http.Handler) http.Handler {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", "1")
 				w.WriteHeader(http.StatusTooManyRequests)
-				w.Write([]byte(`{"error":"rate limited"}`))
+				_, _ = w.Write([]byte(`{"error":"rate limited"}`))
 				return
 			}
 			next.ServeHTTP(w, r)

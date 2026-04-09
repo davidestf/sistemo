@@ -74,7 +74,7 @@ func recordLoginFailure(ip string) {
 	defer loginAttemptsMu.Unlock()
 
 	// Evict stale entries to prevent unbounded map growth (DoS vector)
-	if len(loginAttempts) > 10000 {
+	if len(loginAttempts) > 1000 {
 		cutoff := time.Now().Add(-1 * time.Hour)
 		for k, v := range loginAttempts {
 			if v.lastFailure.Before(cutoff) {

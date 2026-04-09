@@ -41,7 +41,9 @@ func adminResetPasswordCmd() *cobra.Command {
 			}
 
 			var username string
-			database.QueryRow("SELECT username FROM admin_user LIMIT 1").Scan(&username)
+			if err := database.QueryRow("SELECT username FROM admin_user LIMIT 1").Scan(&username); err != nil {
+				return fmt.Errorf("lookup admin username: %w", err)
+			}
 
 			fmt.Printf("Resetting password for: %s\n", username)
 			fmt.Print("New password (min 8 chars): ")

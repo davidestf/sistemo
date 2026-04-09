@@ -1,4 +1,4 @@
-.PHONY: build dashboard test clean lint
+.PHONY: build dashboard test clean lint fmt vet coverage vulncheck
 
 # Build the dashboard frontend and embed it in the Go binary
 dashboard:
@@ -25,6 +25,23 @@ lint:
 # Clean build artifacts
 clean:
 	rm -rf frontend/dashboard/dist internal/agent/api/dashboard_dist sistemo
+
+# Format Go code
+fmt:
+	gofmt -w .
+
+# Run go vet
+vet:
+	go vet ./...
+
+# Run tests with coverage report
+coverage:
+	go test -race -count=1 -coverprofile=coverage.out ./...
+	go tool cover -func=coverage.out
+
+# Check for known vulnerabilities
+vulncheck:
+	govulncheck ./...
 
 # Development: run dashboard dev server with API proxy
 dev-dashboard:

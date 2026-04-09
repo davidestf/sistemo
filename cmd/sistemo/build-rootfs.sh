@@ -5,7 +5,7 @@
 # Usage:
 #   build-rootfs.sh <docker-image> <public-key.pub> [output.ext4]
 #   build-rootfs.sh --dockerfile <context-dir> <public-key.pub> [output.ext4]
-set -e
+set -eo pipefail
 
 # --- Mount isolation (must run BEFORE argument parsing) ---
 # Re-exec in a private mount namespace so our mount/umount operations

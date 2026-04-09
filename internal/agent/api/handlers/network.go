@@ -57,7 +57,9 @@ func (h *Network) Create(w http.ResponseWriter, r *http.Request) {
 		for i := 201; i <= 254; i++ {
 			candidate := fmt.Sprintf("10.%d.0.0/24", i)
 			var count int
-			h.db.QueryRow("SELECT COUNT(*) FROM network WHERE subnet = ?", candidate).Scan(&count)
+			if err := h.db.QueryRow("SELECT COUNT(*) FROM network WHERE subnet = ?", candidate).Scan(&count); err != nil {
+				continue // skip this subnet on DB error
+			}
 			if count == 0 {
 				req.Subnet = candidate
 				break

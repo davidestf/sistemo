@@ -288,13 +288,15 @@ func (h *Machine) Logs(w http.ResponseWriter, r *http.Request) {
 
 	// Stream the last 1MB if file is larger
 	const maxBytes = 1 << 20 // 1MB
-	info, _ := f.Stat()
-	if info != nil && info.Size() > maxBytes {
-		f.Seek(-maxBytes, io.SeekEnd)
+	info, err := f.Stat()
+	if err == nil && info.Size() > maxBytes {
+		if _, seekErr := f.Seek(-maxBytes, io.SeekEnd); seekErr != nil {
+			h.logger.Warn("seek log file failed, streaming from beginning", zap.Error(seekErr))
+		}
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	io.Copy(w, f)
+	_, _ = io.Copy(w, f)
 }
 
 // Expose handles POST /machines/{machineID}/expose — adds a port forwarding rule.
