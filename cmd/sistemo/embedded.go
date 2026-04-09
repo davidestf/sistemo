@@ -7,3 +7,6 @@ var embeddedBuildScript []byte
 
 //go:embed vm-init.sh
 var embeddedVMInit []byte
+
+//go:embed tini-static
+var embeddedTiniStatic []byte

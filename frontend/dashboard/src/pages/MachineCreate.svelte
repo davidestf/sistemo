@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ImageInfo, NetworkInfo, RegistryImage, BuildStatus, VolumeInfo } from '$lib/api/types';
   import { get, post } from '$lib/api/client';
+  import { getToken } from '$lib/stores/auth.svelte';
   import { addToast } from '$lib/stores/toast.svelte';
   import { formatMB } from '$lib/utils/format';
   import Card from '$lib/components/ui/Card.svelte';
@@ -15,7 +16,7 @@
     { id: 'images', label: 'Images' },
     { id: 'docker', label: 'Docker Image' },
     { id: 'url', label: 'URL' },
-    { id: 'dockerfile', label: 'Dockerfile', disabled: true },
+    { id: 'dockerfile', label: 'Dockerfile' },
     { id: 'github', label: 'GitHub', disabled: true },
   ];
 
@@ -50,6 +51,42 @@
       buildLogs = ['Failed to load logs'];
     }
     buildLogsLoading = false;
+  }
+
+  // --- Dockerfile tab ---
+  let dockerfileContent = $state('');
+  let dockerfileContextFile = $state<File | null>(null);
+
+  async function handleDockerfileBuild() {
+    if (!dockerfileContent.trim()) {
+      addToast('Dockerfile content is required', 'error');
+      return;
+    }
+
+    building = true;
+    try {
+      const formData = new FormData();
+      formData.append('dockerfile', dockerfileContent);
+      if (dockerfileContextFile) formData.append('context', dockerfileContextFile);
+      if (name.trim()) formData.append('name', name.trim());
+
+      const token = getToken();
+      const res = await fetch('/api/v1/images/build/dockerfile', {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: formData,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Build request failed' }));
+        throw new Error(err.error || `Build failed (${res.status})`);
+      }
+      const result = await res.json();
+      buildStatus = result;
+      startBuildPolling(result.id || result.build_name);
+    } catch (err) {
+      building = false;
+      addToast(err instanceof Error ? err.message : 'Failed to start Dockerfile build', 'error');
+    }
   }
 
   // --- URL tab ---
@@ -571,16 +608,86 @@
 
     {:else if activeTab === 'dockerfile'}
       <Card>
-        <div class="text-center py-8">
-          <div class="inline-flex items-center justify-center w-12 h-12 rounded-full bg-surface-hover mb-4">
-            <svg class="w-6 h-6 text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
-            </svg>
-          </div>
-          <h3 class="text-sm font-medium text-text mb-2">Coming Soon</h3>
-          <p class="text-sm text-muted mb-1">Build machine images from Dockerfiles</p>
-          <p class="text-xs text-muted">For now: <code class="bg-surface-inner px-1.5 py-0.5 rounded text-accent">docker build -t myapp .</code> then use the Docker Image tab</p>
+        <div class="flex items-center justify-between mb-2">
+          <label class="text-sm font-medium text-text">Dockerfile</label>
+          <button
+            onclick={() => { dockerfileContent = 'FROM nginx:latest\nCOPY index.html /usr/share/nginx/html/\nEXPOSE 80'; }}
+            class="text-xs text-accent hover:underline bg-transparent border-none cursor-pointer"
+          >Load example</button>
         </div>
+        <textarea
+          bind:value={dockerfileContent}
+          placeholder={"FROM ubuntu:24.04\nRUN apt-get update && apt-get install -y nginx\nEXPOSE 80\nCMD [\"nginx\", \"-g\", \"daemon off;\"]"}
+          class="font-mono text-sm bg-terminal text-text w-full h-48 p-3 rounded-lg border border-border resize-y focus:outline-none focus:ring-1 focus:ring-accent"
+          disabled={building}
+        ></textarea>
+
+        <div class="mt-3">
+          <label class="text-sm text-muted block mb-1">Build context (optional)</label>
+          <div class="p-3 border border-dashed border-border rounded-lg text-center">
+            <input
+              type="file"
+              accept=".tar,.tar.gz,.tgz"
+              onchange={(e) => { const t = e.target as HTMLInputElement; dockerfileContextFile = t.files?.[0] ?? null; }}
+              class="text-xs text-muted"
+              disabled={building}
+            />
+            <p class="text-xs text-muted mt-1">Required if your Dockerfile uses COPY or ADD</p>
+          </div>
+        </div>
+
+        <div class="mt-4 flex gap-2">
+          <Button variant="primary" loading={building} onclick={handleDockerfileBuild}>
+            {building ? 'Building...' : 'Build & Deploy'}
+          </Button>
+        </div>
+
+        {#if buildStatus}
+          <div class="mt-4 p-3 rounded-lg border {buildStatus.status === 'building'
+              ? 'bg-accent/5 border-accent/20'
+              : buildStatus.status === 'complete'
+                ? 'bg-success/5 border-success/20'
+                : 'bg-error/5 border-error/20'}">
+            <div class="flex items-center gap-2 mb-2">
+              {#if buildStatus.status === 'building'}
+                <Spinner size="sm" />
+                <span class="text-sm font-medium text-accent">{buildStatus.progress_msg || 'Building...'}</span>
+                <button
+                  onclick={async () => {
+                    try {
+                      await post(`/api/v1/images/build/${encodeURIComponent(buildStatus?.id ?? '')}/cancel`);
+                      if (buildPollTimer) { clearInterval(buildPollTimer); buildPollTimer = null; }
+                      building = false;
+                      buildStatus = { ...buildStatus!, status: 'error', message: 'Cancelled by user' };
+                      addToast('Build cancelled', 'info');
+                    } catch (e) {
+                      addToast('Failed to cancel build', 'error');
+                    }
+                  }}
+                  class="ml-auto text-xs text-muted hover:text-error cursor-pointer bg-transparent border-none transition"
+                >Cancel</button>
+              {:else if buildStatus.status === 'complete'}
+                <svg class="w-4 h-4 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                </svg>
+                <span class="text-sm font-medium text-success">Build complete</span>
+              {:else}
+                <svg class="w-4 h-4 text-error" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+                <span class="text-sm font-medium text-error">Build failed</span>
+              {/if}
+            </div>
+            {#if buildStatus.status === 'building' && (buildStatus.progress ?? 0) > 0}
+              <div class="w-full bg-surface-2 rounded-full h-1.5 mt-2">
+                <div class="bg-accent h-1.5 rounded-full transition-all duration-500" style="width: {buildStatus.progress}%"></div>
+              </div>
+            {/if}
+            {#if buildStatus.status === 'error' && buildStatus.message}
+              <pre class="text-xs text-muted bg-terminal rounded p-2 mt-2 overflow-x-auto max-h-32 whitespace-pre-wrap">{buildStatus.message}</pre>
+            {/if}
+          </div>
+        {/if}
       </Card>
 
     {:else if activeTab === 'github'}

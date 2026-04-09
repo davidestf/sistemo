@@ -1,11 +1,41 @@
 #!/usr/bin/env bash
-# Build a Firecracker rootfs (ext4) from a Docker image.
+# Build a Firecracker rootfs (ext4) from a Docker image or Dockerfile.
 # Progress markers (PROGRESS:N:msg) are parsed by the dashboard handler for live updates.
+#
+# Usage:
+#   build-rootfs.sh <docker-image> <public-key.pub> [output.ext4]
+#   build-rootfs.sh --dockerfile <context-dir> <public-key.pub> [output.ext4]
 set -e
 
-IMAGE="${1:?usage: $0 <docker-image> <public-key.pub> [output.ext4]}"
-PUBKEY="${2:?usage: $0 <docker-image> <public-key.pub> [output.ext4]}"
-OUTPUT="${3:-}"
+# --- Mount isolation (must run BEFORE argument parsing) ---
+# Re-exec in a private mount namespace so our mount/umount operations
+# (loop devices, chroot /proc /sys /dev) don't propagate to the host.
+# This must happen before shift modifies $@ — unshare passes "$@" to the re-exec.
+if [ -z "$_SISTEMO_MOUNT_ISOLATED" ]; then
+  export _SISTEMO_MOUNT_ISOLATED=1
+  exec unshare --mount --propagation private "$0" "$@"
+fi
+
+if [ "$(id -u)" != "0" ]; then
+  echo "ERROR: Requires root (for mount/chroot). Run: sudo sistemo image build $IMAGE" >&2
+  exit 1
+fi
+
+DOCKERFILE_MODE=0
+CLEANUP_IMAGE=0
+
+if [ "$1" = "--dockerfile" ]; then
+  DOCKERFILE_MODE=1
+  CONTEXT_DIR="${2:?usage: $0 --dockerfile <context-dir> <public-key.pub> [output.ext4]}"
+  shift 2
+  PUBKEY="${1:?usage: $0 --dockerfile <context-dir> <public-key.pub> [output.ext4]}"
+  OUTPUT="${2:-custom.rootfs.ext4}"
+  IMAGE=""  # set after docker build
+else
+  IMAGE="${1:?usage: $0 <docker-image> <public-key.pub> [output.ext4]}"
+  PUBKEY="${2:?usage: $0 <docker-image> <public-key.pub> [output.ext4]}"
+  OUTPUT="${3:-}"
+fi
 
 if [ ! -f "$PUBKEY" ]; then
   echo "ERROR: Public key file not found: $PUBKEY" >&2
@@ -15,20 +45,6 @@ fi
 
 if [ -z "$OUTPUT" ]; then
   OUTPUT="$(echo "$IMAGE" | sed 's/[\/:]/-/g').rootfs.ext4"
-fi
-
-if [ "$(id -u)" != "0" ]; then
-  echo "ERROR: Requires root (for mount/chroot). Run: sudo sistemo image build $IMAGE" >&2
-  exit 1
-fi
-
-# --- Mount isolation ---
-# Re-exec in a private mount namespace so our mount/umount operations
-# (loop devices, chroot /proc /sys /dev) don't propagate to the host
-# via shared mount propagation and nuke the system's /proc /sys /dev.
-if [ -z "$_SISTEMO_MOUNT_ISOLATED" ]; then
-  export _SISTEMO_MOUNT_ISOLATED=1
-  exec unshare --mount --propagation private "$0" "$@"
 fi
 
 # --- Pre-flight checks ---
@@ -105,13 +121,77 @@ tracked_umount() {
   ACTIVE_MOUNTS="${ACTIVE_MOUNTS//$target /}"
 }
 
-# --- Phase 1: Docker export ---
+# --- Phase 0: Dockerfile build (if --dockerfile mode) ---
 
-echo "PROGRESS:5:Pulling image..."
-if ! docker pull "$IMAGE" 2>&1; then
-  echo "ERROR: Failed to pull Docker image: $IMAGE" >&2
-  exit 1
+if [ "$DOCKERFILE_MODE" = "1" ]; then
+  if [ ! -f "$CONTEXT_DIR/Dockerfile" ]; then
+    echo "ERROR: No Dockerfile found in context directory: $CONTEXT_DIR" >&2
+    exit 1
+  fi
+
+  # Build tag: use SISTEMO_BUILD_TAG from Go handler (avoids collision) or generate one
+  BUILD_TAG="${SISTEMO_BUILD_TAG:-sistemo-df-$(date +%s%N)}"
+
+  echo "PROGRESS:2:Building Docker image from Dockerfile..."
+  # Parse "Step X/Y" lines and emit PROGRESS markers scaled to 3-40% range
+  BUILD_OK=0
+  docker build -t "$BUILD_TAG" -f "$CONTEXT_DIR/Dockerfile" "$CONTEXT_DIR" 2>&1 | while IFS= read -r line; do
+    echo "$line"
+    if echo "$line" | grep -qE '^Step [0-9]+/[0-9]+'; then
+      STEP=$(echo "$line" | sed 's/Step \([0-9]*\)\/\([0-9]*\).*/\1/')
+      TOTAL=$(echo "$line" | sed 's/Step \([0-9]*\)\/\([0-9]*\).*/\2/')
+      PCT=$((3 + STEP * 37 / TOTAL))
+      echo "PROGRESS:${PCT}:Docker build step ${STEP}/${TOTAL}"
+    fi
+  done
+
+  # Verify docker build succeeded (pipe doesn't propagate exit code without pipefail)
+  if ! docker image inspect "$BUILD_TAG" >/dev/null 2>&1; then
+    echo "ERROR: Docker build failed — check the Dockerfile and build logs" >&2
+    exit 1
+  fi
+
+  IMAGE="$BUILD_TAG"
+  CLEANUP_IMAGE=1
+  echo "PROGRESS:40:Docker image built, converting to rootfs..."
 fi
+
+# --- Phase 1: Docker pull (skipped if image is already local from Dockerfile build) ---
+
+if [ "$DOCKERFILE_MODE" = "0" ]; then
+  echo "PROGRESS:5:Pulling image..."
+  if ! docker pull "$IMAGE" 2>&1; then
+    echo "ERROR: Failed to pull Docker image: $IMAGE" >&2
+    exit 1
+  fi
+fi
+
+# --- Extract Docker metadata ---
+# Capture ENTRYPOINT, CMD, ENV, USER, WORKDIR etc. as plain text files.
+# These are lost by `docker export` (which only exports the filesystem).
+# vm-init.sh reads these at boot to auto-start the application.
+echo "PROGRESS:10:Extracting image metadata..."
+mkdir -p "$TMPDIR/etc/sistemo"
+
+docker inspect --format='{{range .Config.Entrypoint}}{{println .}}{{end}}' "$IMAGE" \
+  > "$TMPDIR/etc/sistemo/entrypoint" 2>/dev/null || true
+docker inspect --format='{{range .Config.Cmd}}{{println .}}{{end}}' "$IMAGE" \
+  > "$TMPDIR/etc/sistemo/cmd" 2>/dev/null || true
+docker inspect --format='{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" \
+  > "$TMPDIR/etc/sistemo/env" 2>/dev/null || true
+docker inspect --format='{{.Config.WorkingDir}}' "$IMAGE" \
+  > "$TMPDIR/etc/sistemo/workdir" 2>/dev/null || true
+docker inspect --format='{{.Config.User}}' "$IMAGE" \
+  > "$TMPDIR/etc/sistemo/user" 2>/dev/null || true
+docker inspect --format='{{range $p, $_ := .Config.ExposedPorts}}{{println $p}}{{end}}' "$IMAGE" \
+  > "$TMPDIR/etc/sistemo/expose" 2>/dev/null || true
+docker inspect --format='{{range $v, $_ := .Config.Volumes}}{{println $v}}{{end}}' "$IMAGE" \
+  > "$TMPDIR/etc/sistemo/volumes" 2>/dev/null || true
+docker inspect --format='{{.Config.StopSignal}}' "$IMAGE" \
+  > "$TMPDIR/etc/sistemo/stopsignal" 2>/dev/null || true
+docker inspect --format='{{json .Config}}' "$IMAGE" \
+  > "$TMPDIR/etc/sistemo/image-config.json" 2>/dev/null || true
+touch "$TMPDIR/etc/sistemo/.docker-image"
 
 echo "PROGRESS:15:Creating container..."
 CID=$(docker create "$IMAGE" /bin/true 2>/dev/null) || {
@@ -235,6 +315,14 @@ mkdir -p "$TMPDIR/sbin"
 rm -f "$TMPDIR/sbin/init"
 ln -s /init "$TMPDIR/sbin/init"
 
+# Inject tini (PID 1 signal forwarding + zombie reaping)
+TINI_SRC="${SCRIPT_DIR}/tini-static"
+if [ -f "$TINI_SRC" ]; then
+  mkdir -p "$TMPDIR/etc/sistemo"
+  cp "$TINI_SRC" "$TMPDIR/etc/sistemo/sistemo-init"
+  chmod 755 "$TMPDIR/etc/sistemo/sistemo-init"
+fi
+
 # --- Phase 5: Fix Docker log symlinks ---
 
 # Docker images symlink logs to /dev/stdout and /dev/stderr for container logging.
@@ -287,6 +375,11 @@ cp -a "$TMPDIR"/.[!.]* "$MNT/" 2>/dev/null || true
 
 tracked_umount "$MNT"
 rmdir "$MNT" 2>/dev/null || true
+
+# Clean up temporary Docker image (Dockerfile builds only)
+if [ "$CLEANUP_IMAGE" = "1" ] && [ -n "$BUILD_TAG" ]; then
+  docker rmi -f "$BUILD_TAG" 2>/dev/null || true
+fi
 
 echo "PROGRESS:100:Build complete"
 echo "Done: $OUTPUT"

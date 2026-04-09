@@ -26,6 +26,7 @@ type DashboardAPI struct {
 	logger          *zap.Logger
 	BuildScript     []byte // embedded build-rootfs.sh content
 	VMInitScript    []byte // embedded vm-init.sh content
+	TiniStatic      []byte // embedded tini static binary for PID 1
 }
 
 func NewDashboardAPI(mgr *machine.Manager, cfg *config.Config, db *sql.DB, logger *zap.Logger) *DashboardAPI {
